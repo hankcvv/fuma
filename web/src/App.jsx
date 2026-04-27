@@ -289,6 +289,7 @@ function App() {
   const [rechargeMethod, setRechargeMethod] = useState("wechat");
   const [botUnlocks, setBotUnlocks] = useState({});
   const [serverBotUnlocks, setServerBotUnlocks] = useState({});
+  const [serviceWechat, setServiceWechat] = useState("");
   /** 精选特码🔥 机器人专家（/bots/1avatar/*.txt） */
   const [botList, setBotList] = useState({ status: "idle", items: [] });
   /** 生肖特码🐴 机器人专家（/bots/2avatar/*.txt） */
@@ -423,6 +424,12 @@ function App() {
       })
       .catch(() => setServerBotUnlocks({}));
   }, [token, me?.username]);
+
+  useEffect(() => {
+    apiFetch(`${API}/settings/service-wechat`)
+      .then((d) => setServiceWechat(String(d?.wechat || "")))
+      .catch(() => setServiceWechat(""));
+  }, []);
 
   useEffect(() => {
     if (page === "detail") {
@@ -1075,7 +1082,7 @@ function App() {
           </div>
           {/* 已移除演示模式与对比调试按钮 */}
           {tabs === "精选特码🔥" && botList.status === "loading" && (
-            <p className="bot-loading">正在加载机器人专家配置…</p>
+            <p className="bot-loading">正在加载机器人专家</p>
           )}
           {tabs === "精选特码🔥" &&
             botList.status === "ready" &&
@@ -1145,7 +1152,7 @@ function App() {
           {(tabs !== "精选特码🔥" || botList.status === "error") &&
             (tabs === "生肖特码🐴"
               ? zodiacBotList.status === "loading"
-                ? [<p key="z-loading" className="bot-loading">正在加载生肖机器人…</p>]
+                ? [<p key="z-loading" className="bot-loading">正在加载机器人专家</p>]
                 : zodiacBotList.status === "ready"
                   ? zodiacBotList.items.map((spec) => {
                       const dd = getBotDisplayData(spec);
@@ -1220,7 +1227,7 @@ function App() {
                     : []
               : tabs === "精选三中三💯"
                 ? threeBotList.status === "loading"
-                  ? [<p key="t-loading" className="bot-loading">正在加载三中三机器人…</p>]
+                  ? [<p key="t-loading" className="bot-loading">正在加载机器人专家</p>]
                   : threeBotList.status === "ready"
                     ? threeBotList.items.map((spec) => {
                         const dd = getBotDisplayData(spec);
@@ -1931,6 +1938,17 @@ function App() {
         </main>
       )}
       {payToast ? <p className="toast toast-above-tab">{payToast}</p> : null}
+      {serviceWechat ? (
+        <button
+          type="button"
+          className="kefu-float-btn"
+          onClick={() => {
+            flashToast(`客服微信：${serviceWechat}`);
+          }}
+        >
+          客服
+        </button>
+      ) : null}
       <nav className="bottom" aria-label="主导航">
         <button type="button" className={page === "home" ? "tab active" : "tab"} onClick={() => setPage("home")}>
           <img src={tabIcons.home} alt="" />

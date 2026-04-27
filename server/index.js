@@ -93,6 +93,11 @@ CREATE TABLE IF NOT EXISTS bot_unlocks (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   UNIQUE(user_id, bot_key, issue)
 );
+
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
 `);
 
 function ensureColumn(table, column, sqlTypeAndDefault) {
@@ -105,6 +110,7 @@ ensureColumn("users", "frozen", "INTEGER DEFAULT 0");
 ensureColumn("users", "last_login_at", "TEXT");
 ensureColumn("users", "role", "TEXT DEFAULT 'user'");
 db.prepare("UPDATE users SET role='admin' WHERE username='admin'").run();
+db.prepare("INSERT OR IGNORE INTO app_settings(key, value) VALUES('service_wechat','')").run();
 
 const expertCount = db.prepare("SELECT COUNT(*) AS c FROM experts").get().c;
 if (!expertCount) {
@@ -267,6 +273,11 @@ app.get("/api/user/me", ensureAuth, (req, res) => {
   res.json(user);
 });
 
+app.get("/api/settings/service-wechat", (_req, res) => {
+  const row = db.prepare("SELECT value FROM app_settings WHERE key='service_wechat'").get();
+  res.json({ wechat: String(row?.value || "") });
+});
+
 app.get("/api/user/orders", ensureAuth, (req, res) => {
   const orders = db
     .prepare(
@@ -424,6 +435,18 @@ app.get("/api/admin/overview", ensureAuth, (_req, res) => {
   const orders = db.prepare("SELECT COUNT(*) AS c FROM orders").get().c;
   const paidAmount = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE status='success'").get().total;
   res.json({ users, experts, orders, paidAmount });
+});
+
+app.get("/api/admin/settings", ensureAuth, ensureAdmin, (_req, res) => {
+  const row = db.prepare("SELECT value FROM app_settings WHERE key='service_wechat'").get();
+  res.json({ serviceWechat: String(row?.value || "") });
+});
+
+app.put("/api/admin/settings", ensureAuth, ensureAdmin, (req, res) => {
+  const serviceWechat = String(req.body?.serviceWechat || "").trim();
+  db.prepare("INSERT INTO app_settings(key, value) VALUES('service_wechat', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+    .run(serviceWechat);
+  res.json({ message: "设置已保存", serviceWechat });
 });
 
 app.post("/api/admin/change-password", ensureAuth, ensureAdmin, async (req, res) => {

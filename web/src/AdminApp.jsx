@@ -38,6 +38,7 @@ export default function AdminApp() {
   const [users, setUsers] = useState([]);
   const [orderRecords, setOrderRecords] = useState([]);
   const [subAdmins, setSubAdmins] = useState([]);
+  const [serviceWechat, setServiceWechat] = useState("");
   const [robotExperts, setRobotExperts] = useState([]);
   const [expertType, setExpertType] = useState("all");
   const [botEditorOpen, setBotEditorOpen] = useState(false);
@@ -255,16 +256,18 @@ export default function AdminApp() {
     if (!token) return;
     setLoading(true);
     try {
-      const [o, u, od, sa] = await Promise.all([
+      const [o, u, od, sa, st] = await Promise.all([
         withAuth("/admin/overview"),
         withAuth("/admin/users"),
         withAuth("/admin/orders"),
-        withAuth("/admin/subadmins").catch(() => [])
+        withAuth("/admin/subadmins").catch(() => []),
+        withAuth("/admin/settings").catch(() => ({}))
       ]);
       setOverview(o);
       setUsers(u);
       setOrderRecords(Array.isArray(od) ? od : []);
       setSubAdmins(Array.isArray(sa) ? sa : []);
+      setServiceWechat(String(st?.serviceWechat || ""));
       await loadRobotExperts();
     } catch (e) {
       message.error(e.message);
@@ -340,6 +343,33 @@ export default function AdminApp() {
         <Card><Statistic title="订单数" value={overview?.orders || 0} /></Card>
         <Card><Statistic title="充值总额" value={Number(overview?.paidAmount || 0).toFixed(2)} prefix="¥" /></Card>
       </Space>
+      <Card size="small" style={{ marginBottom: 12 }}>
+        <Space wrap>
+          <span>客服微信号：</span>
+          <Input
+            value={serviceWechat}
+            onChange={(e) => setServiceWechat(e.target.value)}
+            placeholder="例如 wx123456"
+            style={{ width: 220 }}
+          />
+          <Button
+            type="primary"
+            onClick={async () => {
+              try {
+                await withAuth("/admin/settings", {
+                  method: "PUT",
+                  body: JSON.stringify({ serviceWechat: String(serviceWechat || "").trim() })
+                });
+                message.success("客服微信已保存");
+              } catch (e) {
+                message.error(e.message || "保存失败");
+              }
+            }}
+          >
+            保存客服微信
+          </Button>
+        </Space>
+      </Card>
 
       <Tabs
         items={[
