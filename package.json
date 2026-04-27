@@ -1,0 +1,13 @@
+{
+  "name": "fuma",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm --prefix server run dev\" \"npx wait-on http-get://127.0.0.1:4000/api/auth/captcha && npm --prefix web run dev\"",
+    "start": "npm run build --prefix web && cross-env NODE_ENV=production npm --prefix server start"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "cross-env": "^7.0.3",
+    "wait-on": "^8.0.5"
+  }
+}
