@@ -329,6 +329,23 @@ input {
   background: rgba(255, 255, 255, 0.96);
 }
 
+.toast-top-strong {
+  position: fixed;
+  left: 50%;
+  top: 72px;
+  transform: translateX(-50%);
+  z-index: 320;
+  min-width: 220px;
+  max-width: calc(100vw - 28px);
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(8, 30, 68, 0.96);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 700;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.25);
+}
+
 .expert-row {
   display: flex;
   align-items: center;

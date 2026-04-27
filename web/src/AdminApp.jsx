@@ -255,22 +255,25 @@ export default function AdminApp() {
   const loadAll = async () => {
     if (!token) return;
     setLoading(true);
+    const [o, u, od, sa, st] = await Promise.allSettled([
+      withAuth("/admin/overview"),
+      withAuth("/admin/users"),
+      withAuth("/admin/orders"),
+      withAuth("/admin/subadmins").catch(() => []),
+      withAuth("/admin/settings").catch(() => ({}))
+    ]);
+    if (o.status === "fulfilled") setOverview(o.value);
+    if (u.status === "fulfilled") setUsers(Array.isArray(u.value) ? u.value : []);
+    if (od.status === "fulfilled") setOrderRecords(Array.isArray(od.value) ? od.value : []);
+    if (sa.status === "fulfilled") setSubAdmins(Array.isArray(sa.value) ? sa.value : []);
+    if (st.status === "fulfilled") setServiceWechat(String(st.value?.serviceWechat || ""));
+    if (o.status === "rejected" || u.status === "rejected" || od.status === "rejected") {
+      message.warning("部分数据刷新失败，已显示可用数据");
+    }
     try {
-      const [o, u, od, sa, st] = await Promise.all([
-        withAuth("/admin/overview"),
-        withAuth("/admin/users"),
-        withAuth("/admin/orders"),
-        withAuth("/admin/subadmins").catch(() => []),
-        withAuth("/admin/settings").catch(() => ({}))
-      ]);
-      setOverview(o);
-      setUsers(u);
-      setOrderRecords(Array.isArray(od) ? od : []);
-      setSubAdmins(Array.isArray(sa) ? sa : []);
-      setServiceWechat(String(st?.serviceWechat || ""));
       await loadRobotExperts();
-    } catch (e) {
-      message.error(e.message);
+    } catch {
+      message.warning("机器人数据刷新失败，请稍后重试");
     } finally {
       setLoading(false);
     }
