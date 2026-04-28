@@ -264,12 +264,12 @@ app.post("/api/auth/register", async (req, res) => {
       );
     } else {
       db.prepare("INSERT INTO users(username, password_hash, avatar, balance, role) VALUES(?,?,?,?,?)").run(
-        username,
-        passwordHash,
+      username,
+      passwordHash,
         "https://i.pravatar.cc/80",
         0,
         "user"
-      );
+    );
     }
     res.json({ message: "注册成功" });
   } catch (e) {
@@ -397,10 +397,10 @@ app.get("/api/user/orders", ensureAuth, async (req, res) => {
         [req.user.id]
       )
     : db
-        .prepare(
-          "SELECT o.*, p.title FROM orders o LEFT JOIN predictions p ON p.id=o.prediction_id WHERE o.user_id=? ORDER BY o.id DESC"
-        )
-        .all(req.user.id);
+    .prepare(
+      "SELECT o.*, p.title FROM orders o LEFT JOIN predictions p ON p.id=o.prediction_id WHERE o.user_id=? ORDER BY o.id DESC"
+    )
+    .all(req.user.id);
   res.json(orders);
 });
 
@@ -411,10 +411,10 @@ app.get("/api/user/follows", ensureAuth, async (req, res) => {
         [req.user.id]
       )
     : db
-        .prepare(
-          "SELECT e.* FROM follows f LEFT JOIN experts e ON e.id=f.expert_id WHERE f.user_id=? ORDER BY f.id DESC"
-        )
-        .all(req.user.id);
+    .prepare(
+      "SELECT e.* FROM follows f LEFT JOIN experts e ON e.id=f.expert_id WHERE f.user_id=? ORDER BY f.id DESC"
+    )
+    .all(req.user.id);
   res.json(rows);
 });
 
@@ -434,7 +434,7 @@ app.post("/api/experts/:id/follow", ensureAuth, async (req, res) => {
     if (USE_MYSQL) {
       await mysqlExecute("INSERT INTO follows(user_id, expert_id) VALUES(?,?)", [req.user.id, Number(req.params.id)]);
     } else {
-      db.prepare("INSERT INTO follows(user_id, expert_id) VALUES(?,?)").run(req.user.id, Number(req.params.id));
+    db.prepare("INSERT INTO follows(user_id, expert_id) VALUES(?,?)").run(req.user.id, Number(req.params.id));
     }
     res.json({ message: "关注成功" });
   } catch {
@@ -446,7 +446,7 @@ app.delete("/api/experts/:id/follow", ensureAuth, async (req, res) => {
   if (USE_MYSQL) {
     await mysqlExecute("DELETE FROM follows WHERE user_id=? AND expert_id=?", [req.user.id, Number(req.params.id)]);
   } else {
-    db.prepare("DELETE FROM follows WHERE user_id=? AND expert_id=?").run(req.user.id, Number(req.params.id));
+  db.prepare("DELETE FROM follows WHERE user_id=? AND expert_id=?").run(req.user.id, Number(req.params.id));
   }
   res.json({ message: "已取消关注" });
 });
@@ -461,16 +461,16 @@ app.get("/api/predictions", ensureAuth, async (req, res) => {
         category ? [category] : []
       )
     : category
-      ? db
-          .prepare(
-            "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.category=? ORDER BY p.id DESC"
-          )
-          .all(category)
-      : db
-          .prepare(
-            "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC"
-          )
-          .all();
+    ? db
+        .prepare(
+          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.category=? ORDER BY p.id DESC"
+        )
+        .all(category)
+    : db
+        .prepare(
+          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC"
+        )
+        .all();
   res.json(
     (rows || []).map((r) => ({
       ...r,
@@ -493,16 +493,16 @@ app.get("/api/predictions/:id", ensureAuth, async (req, res) => {
         [pid]
       )
     : db
-        .prepare(
-          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.id=?"
-        )
+    .prepare(
+      "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.id=?"
+    )
         .get(pid);
   if (!row) return res.status(404).json({ message: "内容不存在" });
   const paid = USE_MYSQL
     ? await mysqlOne("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'", [req.user.id, row.id])
     : db
-        .prepare("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'")
-        .get(req.user.id, row.id);
+    .prepare("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'")
+    .get(req.user.id, row.id);
   const canRead = row.is_free === 1 || !!paid;
   res.json({
     ...row,
@@ -556,8 +556,8 @@ app.post("/api/orders/:id/pay", ensureAuth, async (req, res) => {
     await mysqlExecute("UPDATE users SET balance=balance-? WHERE id=?", [order.amount, req.user.id]);
     await mysqlExecute("UPDATE orders SET status='success', paid_at=? WHERE id=?", [new Date(), order.id]);
   } else {
-    db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(order.amount, req.user.id);
-    db.prepare("UPDATE orders SET status='success', paid_at=? WHERE id=?").run(new Date().toISOString(), order.id);
+  db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(order.amount, req.user.id);
+  db.prepare("UPDATE orders SET status='success', paid_at=? WHERE id=?").run(new Date().toISOString(), order.id);
   }
   res.json({ message: "支付成功" });
 });

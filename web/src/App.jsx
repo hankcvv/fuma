@@ -174,6 +174,76 @@ function formatZodiacPaidContent(raw) {
   return zodiacs.join("，") || "—";
 }
 
+const ZODIAC_POOL = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+
+function makeSeededRng(seedText) {
+  let s = hashCode(seedText);
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function pickDistinctWithSeed(pool, count, rng) {
+  const arr = [...pool];
+  for (let i = arr.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(rng() * (i + 1));
+    const t = arr[i];
+    arr[i] = arr[j];
+    arr[j] = t;
+  }
+  return arr.slice(0, Math.max(1, Math.min(count, arr.length)));
+}
+
+function parseZodiacCounts(spec) {
+  const title = String(spec?.title || "");
+  const pred = String(spec?.prediction || "");
+  const mTitle = title.match(/(\d+)\s*肖\D*(\d+)\s*码/u);
+  if (mTitle) return { zCount: Math.max(1, Number(mTitle[1])), nCount: Math.max(1, Number(mTitle[2])) };
+  const z = parseZodiacPrediction(pred).zodiacs.length;
+  const n = (pred.match(/\d+/g) || []).length;
+  return { zCount: z || 3, nCount: n || 6 };
+}
+
+function parseThreeGroupCount(spec) {
+  const title = String(spec?.title || "");
+  const m = title.match(/(\d+)\s*组/u);
+  if (m) return Math.max(1, Number(m[1]));
+  const groups = String(spec?.prediction || "").trim().split(/\s+/).filter(Boolean);
+  return Math.max(1, groups.length || 3);
+}
+
+function syntheticZodiacPrediction(spec, issue) {
+  const { zCount, nCount } = parseZodiacCounts(spec);
+  const key = `${spec?.bot_name || ""}|${spec?.robotId || ""}|zodiac|${issue}`;
+  const rng = makeSeededRng(key);
+  const zodiacs = pickDistinctWithSeed(ZODIAC_POOL, zCount, rng);
+  const nums = pickDistinctWithSeed(Array.from({ length: 49 }, (_, i) => String(i + 1).padStart(2, "0")), nCount, rng)
+    .map((x) => Number(x))
+    .sort((a, b) => a - b)
+    .map((x) => String(x).padStart(2, "0"));
+  return `${zodiacs.join("，")}，${nums.join(",")}`;
+}
+
+function syntheticThreePrediction(spec, issue) {
+  const groupCount = parseThreeGroupCount(spec);
+  const key = `${spec?.bot_name || ""}|${spec?.robotId || ""}|three|${issue}`;
+  const rng = makeSeededRng(key);
+  const all = Array.from({ length: 49 }, (_, i) => String(i + 1).padStart(2, "0"));
+  const groups = [];
+  for (let i = 0; i < groupCount; i += 1) {
+    const pick = pickDistinctWithSeed(all, 3, rng).map((x) => Number(x)).sort((a, b) => a - b).map((x) => String(x).padStart(2, "0"));
+    groups.push(pick.join("-"));
+  }
+  return groups.join(" ");
+}
+
+function generatedPredictionByType(spec, issue, { zodiac, three }) {
+  if (zodiac) return syntheticZodiacPrediction(spec, issue);
+  if (three) return syntheticThreePrediction(spec, issue);
+  return "";
+}
+
 async function fetchBotsByBase(base) {
   const rows = await apiFetch(`${API}/bots/${base}`, { cache: "no-store" });
   return (Array.isArray(rows) ? rows : [])
@@ -764,14 +834,22 @@ function App() {
     const liveIssue = macauRows.status === "ok" ? String(macauRows.rows?.[0]?.expect || "") : "";
     const publishIssue = nextBotIssueFromLive(liveIssue, nowTick);
     const displayIssue = String(publishIssue || getCurrentBotIssue(nowTick) || spec.issue || (rt?.displayIssue ?? ""));
+    const specIssueMatch = normalizeIssueKey(spec?.issue) === normalizeIssueKey(displayIssue);
     const latestPrediction = zodiac || three
-      ? String(spec.prediction || "—")
+      ? String((specIssueMatch && spec?.prediction) ? spec.prediction : generatedPredictionByType(spec, displayIssue, { zodiac, three }) || spec.prediction || "—")
       : String(spec.prediction || rt?.generatedPrediction || "—");
     const savedPast = Array.isArray(spec.recent10)
       ? spec.recent10.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") })).filter((r) => r.issue)
       : [];
+    const generatedPast = (zodiac || three)
+      ? Array.from({ length: 10 }, (_, idx) => {
+          const iss = String(Number(displayIssue) - (idx + 1));
+          return { issue: iss, body: generatedPredictionByType(spec, iss, { zodiac, three }) };
+        })
+      : [];
     const candidates = [
       ...((rt?.pastRows || []).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }))),
+      ...generatedPast,
       ...savedPast
     ];
     // 期号始终按当前 displayIssue 连续倒推，内容优先使用已保存往期
@@ -837,9 +915,20 @@ function App() {
     const zodiac = isZodiacBot(spec);
     const three = isThreeBot(spec);
     if (zodiac || three) {
-      const current = { issue: String(spec.issue || ""), body: String(spec.prediction || "") };
-      const past = (spec.recent10 || []).slice(0, 10).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
-      return [current, ...past].filter((r) => r.issue);
+      const liveIssue = macauRows.status === "ok" ? String(macauRows.rows?.[0]?.expect || "") : "";
+      const publishIssue = nextBotIssueFromLive(liveIssue, nowTick) || String(spec.issue || "");
+      const specIssueMatch = normalizeIssueKey(spec?.issue) === normalizeIssueKey(publishIssue);
+      const current = {
+        issue: String(publishIssue || spec.issue || ""),
+        body: String((specIssueMatch && spec?.prediction) ? spec.prediction : generatedPredictionByType(spec, publishIssue, { zodiac, three }) || spec.prediction || "")
+      };
+      const savedPast = (spec.recent10 || []).slice(0, 10).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
+      const generatedPast = Array.from({ length: 10 }, (_, idx) => {
+        const iss = String(Number(publishIssue) - (idx + 1));
+        return { issue: iss, body: generatedPredictionByType(spec, iss, { zodiac, three }) };
+      });
+      const mergedPast = buildContiguousPastRows(current.issue, current.body, [...generatedPast, ...savedPast], 10);
+      return [current, ...mergedPast].filter((r) => r.issue);
     }
     const rt = getBotRuntime(spec, nowTick);
     const current = { issue: String(rt.displayIssue || ""), body: String(rt.generatedPrediction || "") };

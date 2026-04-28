@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Form, Input, Modal, Space, Statistic, Table, Tabs, Tag, message } from "antd";
+import { Button, Card, Checkbox, Form, Input, Modal, Select, Space, Statistic, Table, Tabs, Tag, message } from "antd";
 import "antd/dist/reset.css";
 import { getBotRuntime } from "./botParser.js";
 
@@ -98,19 +98,37 @@ export default function AdminApp() {
   const [subUser, setSubUser] = useState("");
   const [subPass, setSubPass] = useState("");
   const [subSaving, setSubSaving] = useState(false);
-  const [batchOpen, setBatchOpen] = useState(false);
-  const [batchNum, setBatchNum] = useState("");
-  const [batchSaving, setBatchSaving] = useState(false);
+  const [historyToolOpen, setHistoryToolOpen] = useState(false);
+  const [historySaving, setHistorySaving] = useState(false);
+  const [historyBase, setHistoryBase] = useState("1avatar");
+  const [historyIssue, setHistoryIssue] = useState("");
+  const [historySelectedIds, setHistorySelectedIds] = useState([]);
+  const [historyNumInput, setHistoryNumInput] = useState("");
+  const [historyZodiacInput, setHistoryZodiacInput] = useState("鼠");
+  const [historyThreeA, setHistoryThreeA] = useState("");
+  const [historyThreeB, setHistoryThreeB] = useState("");
+  const [historyThreeC, setHistoryThreeC] = useState("");
   const [loginForm] = Form.useForm();
   const { withAuth } = useAdminApi(token);
   const filteredRobotExperts = useMemo(() => {
     if (expertType === "all") return robotExperts;
     return (robotExperts || []).filter((x) => String(x.base || "") === expertType);
   }, [robotExperts, expertType]);
-  const missRowsForSpecial = useMemo(
-    () => (robotExperts || []).filter((x) => x.base === "1avatar" && x.latestStamp === "miss"),
-    [robotExperts]
+  const historyRowsByBase = useMemo(
+    () => (robotExperts || []).filter((x) => x.base === historyBase),
+    [robotExperts, historyBase]
   );
+  const historyIssueOptions = useMemo(() => {
+    const set = new Set();
+    for (const r of historyRowsByBase) {
+      if (r.latestIssue) set.add(String(r.latestIssue));
+      for (const p of (r.effectiveRecent10 || r.recent10 || [])) {
+        if (p?.issue) set.add(String(p.issue));
+      }
+    }
+    return [...set].sort((a, b) => Number(b) - Number(a));
+  }, [historyRowsByBase]);
+  const ZODIAC_OPTIONS = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
   const replaceOneNum = (text, targetNum) => {
     const raw = String(text || "");
     const target = Number(targetNum);
@@ -120,12 +138,46 @@ export default function AdminApp() {
       .map((m, i) => ({ i, n: Number(m[0]), pad: String(m[0]).length >= 2 ? 2 : 1 }))
       .filter((x) => Number.isFinite(x.n) && x.n >= 1 && x.n <= 49);
     if (!idxs.length) return raw;
+    // 目标数字已存在则不再修改
+    if (idxs.some((x) => x.n === target)) return raw;
     const pick = idxs[Math.floor(Math.random() * idxs.length)];
     let k = -1;
     return raw.replace(/\d+/g, (m) => {
       k += 1;
       if (k !== pick.i) return m;
       return String(target).padStart(pick.pad, "0");
+    });
+  };
+  const replaceOneZodiac = (text, zodiac) => {
+    const raw = String(text || "");
+    const target = String(zodiac || "").trim();
+    if (!target) return raw;
+    if (raw.includes(target)) return raw;
+    // 兼容简繁体：鸡/雞、马/馬、龙/龍、猪/豬
+    const all = [...raw.matchAll(/[鼠牛虎兔龙龍蛇马馬羊猴鸡雞狗猪豬]/g)];
+    if (!all.length) return raw;
+    const pick = Math.floor(Math.random() * all.length);
+    let k = -1;
+    return raw.replace(/[鼠牛虎兔龙龍蛇马馬羊猴鸡雞狗猪豬]/g, (m) => {
+      k += 1;
+      if (k !== pick) return m;
+      return target;
+    });
+  };
+  const format2 = (n) => String(Number(n)).padStart(2, "0");
+  const replaceOneThreeGroup = (text, a, b, c) => {
+    const raw = String(text || "");
+    const groupRe = /\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}/g;
+    const matches = [...raw.matchAll(groupRe)];
+    const nextGroup = `${format2(a)}-${format2(b)}-${format2(c)}`;
+    if (raw.includes(nextGroup)) return raw;
+    if (!matches.length) return raw;
+    const pick = Math.floor(Math.random() * matches.length);
+    let k = -1;
+    return raw.replace(groupRe, (m) => {
+      k += 1;
+      if (k !== pick) return m;
+      return nextGroup;
     });
   };
 
@@ -192,6 +244,67 @@ export default function AdminApp() {
     const groups = parseThreeGroups(predictionText);
     return groups.some((nums) => nums.every((n) => first6.has(String(parseInt(n, 10)).padStart(2, "0"))));
   };
+  const ZODIAC_POOL = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+  const seededRng = (seedText) => {
+    let s = 0;
+    const t = String(seedText || "");
+    for (let i = 0; i < t.length; i += 1) s = ((s * 131) + t.charCodeAt(i)) >>> 0;
+    return () => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return s / 4294967296;
+    };
+  };
+  const pickDistinct = (pool, count, rng) => {
+    const arr = [...pool];
+    for (let i = arr.length - 1; i > 0; i -= 1) {
+      const j = Math.floor(rng() * (i + 1));
+      const tmp = arr[i];
+      arr[i] = arr[j];
+      arr[j] = tmp;
+    }
+    return arr.slice(0, Math.max(1, Math.min(count, arr.length)));
+  };
+  const parseZodiacCounts = (spec) => {
+    const title = String(spec?.title || "");
+    const pred = String(spec?.prediction || "");
+    const m = title.match(/(\d+)\s*肖\D*(\d+)\s*码/u);
+    if (m) return { zCount: Math.max(1, Number(m[1])), nCount: Math.max(1, Number(m[2])) };
+    const zCount = (pred.split(/[，,\s]+/).filter((x) => x && !/\d/.test(x)).length) || 3;
+    const nCount = ((pred.match(/\d+/g) || []).length) || 6;
+    return { zCount, nCount };
+  };
+  const parseThreeGroupCount = (spec) => {
+    const title = String(spec?.title || "");
+    const m = title.match(/(\d+)\s*组/u);
+    if (m) return Math.max(1, Number(m[1]));
+    const groups = String(spec?.prediction || "").trim().split(/\s+/).filter(Boolean);
+    return Math.max(1, groups.length || 3);
+  };
+  const generatedPredictionByType = (spec, issue) => {
+    const issueText = String(issue || "");
+    if (isZodiacBot(spec)) {
+      const { zCount, nCount } = parseZodiacCounts(spec);
+      const rng = seededRng(`${spec?.bot_name || ""}|${spec?.robotId || ""}|zodiac|${issueText}`);
+      const zods = pickDistinct(ZODIAC_POOL, zCount, rng);
+      const nums = pickDistinct(Array.from({ length: 49 }, (_, i) => String(i + 1).padStart(2, "0")), nCount, rng)
+        .map((x) => Number(x))
+        .sort((a, b) => a - b)
+        .map((x) => String(x).padStart(2, "0"));
+      return `${zods.join("，")}，${nums.join(",")}`;
+    }
+    if (isThreeBot(spec)) {
+      const groupCount = parseThreeGroupCount(spec);
+      const rng = seededRng(`${spec?.bot_name || ""}|${spec?.robotId || ""}|three|${issueText}`);
+      const all = Array.from({ length: 49 }, (_, i) => String(i + 1).padStart(2, "0"));
+      const groups = [];
+      for (let i = 0; i < groupCount; i += 1) {
+        const pick = pickDistinct(all, 3, rng).map((x) => Number(x)).sort((a, b) => a - b).map((x) => String(x).padStart(2, "0"));
+        groups.push(pick.join("-"));
+      }
+      return groups.join(" ");
+    }
+    return String(spec?.prediction || "");
+  };
 
   const buildContiguousPastRows = (displayIssue, latestPrediction, candidateRows = [], limit = 10) => {
     const issueNum = Number(String(displayIssue || "").replace(/\D/g, ""));
@@ -230,9 +343,20 @@ export default function AdminApp() {
       const three = isThreeBot(spec);
       const rt = zodiac || three ? null : getBotRuntime(spec, new Date());
       const displayIssue = String(publishIssue || liveIssue || spec.issue || rt?.displayIssue || "");
-      const displayPred = String(spec.prediction || rt?.generatedPrediction || "");
+      const issueMatch = normalizeIssueKey(spec.issue) === normalizeIssueKey(displayIssue);
+      const displayPred = String(
+        isZodiacBot(spec) || isThreeBot(spec)
+          ? ((issueMatch && spec.prediction) ? spec.prediction : generatedPredictionByType(spec, displayIssue))
+          : (spec.prediction || rt?.generatedPrediction || "")
+      );
       const candidates = [
         ...((rt?.pastRows || []).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }))),
+        ...(isZodiacBot(spec) || isThreeBot(spec)
+          ? Array.from({ length: 10 }, (_, idx) => {
+              const iss = String(Number(displayIssue) - (idx + 1));
+              return { issue: iss, body: generatedPredictionByType(spec, iss) };
+            })
+          : []),
         ...(Array.isArray(spec.recent10) ? spec.recent10 : [])
       ];
       const syncedPast = buildContiguousPastRows(displayIssue, displayPred, candidates, 10);
@@ -331,6 +455,15 @@ export default function AdminApp() {
   useEffect(() => {
     loadAll();
   }, [token]);
+
+  useEffect(() => {
+    if (!historyIssueOptions.length) {
+      setHistoryIssue("");
+      return;
+    }
+    setHistoryIssue((prev) => (prev && historyIssueOptions.includes(prev) ? prev : historyIssueOptions[0]));
+    setHistorySelectedIds([]);
+  }, [historyIssueOptions]);
 
   const login = async (vals) => {
     try {
@@ -539,13 +672,9 @@ export default function AdminApp() {
                   <Button type={expertType === "1avatar" ? "primary" : "default"} onClick={() => setExpertType("1avatar")}>精选特码🔥</Button>
                   <Button type={expertType === "2avatar" ? "primary" : "default"} onClick={() => setExpertType("2avatar")}>生肖特码🐴</Button>
                   <Button type={expertType === "3avatar" ? "primary" : "default"} onClick={() => setExpertType("3avatar")}>精选三中三💯</Button>
-                  {expertType === "1avatar" ? (
-                    <Button
-                      onClick={() => setBatchOpen(true)}
-                    >
-                      一键修改精选特码最新付费内容
-                    </Button>
-                  ) : null}
+                  <Button onClick={() => setHistoryToolOpen(true)}>
+                    修改往期记录
+                  </Button>
                 </Space>
                 <Table
                   rowKey="id"
@@ -668,50 +797,160 @@ export default function AdminApp() {
       />
 
       <Modal
-        open={batchOpen}
-        title="一键修改精选特码（黑状态）"
+        width={860}
+        open={historyToolOpen}
+        title="修改往期记录"
         okText="确认修改"
         cancelText="取消"
-        confirmLoading={batchSaving}
-        onCancel={() => setBatchOpen(false)}
+        confirmLoading={historySaving}
+        onCancel={() => setHistoryToolOpen(false)}
         onOk={async () => {
-          const n = Number(batchNum);
-          if (!Number.isFinite(n) || n < 1 || n > 49) {
-            message.error("请输入 1-49 的数字");
+          if (!historyIssue) {
+            message.error("请先选择期数");
             return;
           }
+          const targets = historyRowsByBase.filter((r) => historySelectedIds.includes(r.id));
+          if (!targets.length) {
+            message.error("请至少勾选一个机器人");
+            return;
+          }
+          let nextNum = Number(historyNumInput);
+          if (historyBase === "1avatar" || historyBase === "2avatar") {
+            if (!Number.isFinite(nextNum) || nextNum < 1 || nextNum > 49) {
+              message.error("请输入 1-49 的数字");
+              return;
+            }
+            nextNum = Math.floor(nextNum);
+          }
+          if (historyBase === "3avatar") {
+            const a = Number(historyThreeA);
+            const b = Number(historyThreeB);
+            const c = Number(historyThreeC);
+            if (![a, b, c].every((x) => Number.isFinite(x) && x >= 1 && x <= 49)) {
+              message.error("三中三请填写 3 个 1-49 的数字");
+              return;
+            }
+          }
           try {
-            setBatchSaving(true);
-            const targets = missRowsForSpecial;
+            setHistorySaving(true);
             for (const row of targets) {
-              const nextPred = replaceOneNum(String(row.effectivePrediction || row.prediction || ""), n);
+              const oldRecent = Array.isArray(row.effectiveRecent10) ? row.effectiveRecent10 : (Array.isArray(row.recent10) ? row.recent10 : []);
+              const recent10 = oldRecent.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
+              const idx = recent10.findIndex((r) => normalizeIssueKey(r.issue) === normalizeIssueKey(historyIssue));
+              const sourceBody = idx >= 0 ? recent10[idx].body : String(row.effectivePrediction || row.prediction || "");
+              let nextBody = sourceBody;
+              if (historyBase === "1avatar") {
+                nextBody = replaceOneNum(sourceBody, nextNum);
+              } else if (historyBase === "2avatar") {
+                nextBody = replaceOneNum(replaceOneZodiac(sourceBody, historyZodiacInput), nextNum);
+              } else {
+                nextBody = replaceOneThreeGroup(sourceBody, historyThreeA, historyThreeB, historyThreeC);
+              }
+              if (idx >= 0) recent10[idx] = { ...recent10[idx], body: nextBody };
+              else recent10.unshift({ issue: String(historyIssue), body: nextBody });
               await withAuth(`/admin/bot-experts/${row.base}/${row.file}`, {
                 method: "PUT",
                 body: JSON.stringify({
                   issue: String(row.latestIssue || row.issue || ""),
-                  prediction: nextPred,
-                  recent10: Array.isArray(row.effectiveRecent10) ? row.effectiveRecent10 : (Array.isArray(row.recent10) ? row.recent10 : [])
+                  prediction: String(row.effectivePrediction || row.prediction || ""),
+                  recent10
                 })
               });
             }
-            message.success(`已修改 ${targets.length} 个黑状态机器人`);
-            setBatchOpen(false);
-            setBatchNum("");
+            message.success(`已更新 ${targets.length} 个机器人在第${historyIssue}期的往期内容`);
+            setHistoryToolOpen(false);
             await loadAll();
           } catch (e) {
             message.error(e.message || "批量修改失败");
           } finally {
-            setBatchSaving(false);
+            setHistorySaving(false);
           }
         }}
       >
-        <div style={{ display: "grid", gap: 8 }}>
-          <div>当前黑状态数量：{missRowsForSpecial.length}</div>
-          <div style={{ maxHeight: 120, overflow: "auto", background: "#fafafa", padding: 8, borderRadius: 6 }}>
-            {(missRowsForSpecial || []).map((x) => x.name).join("、") || "暂无"}
+        <div style={{ display: "grid", gap: 10 }}>
+          <Space wrap>
+            <span>版面：</span>
+            <Select
+              style={{ width: 220 }}
+              value={historyBase}
+              onChange={setHistoryBase}
+              options={[
+                { value: "1avatar", label: "精选特码机器人" },
+                { value: "2avatar", label: "生肖特码机器人" },
+                { value: "3avatar", label: "精选三中三机器人" }
+              ]}
+            />
+            <span>期数：</span>
+            <Select
+              style={{ width: 160 }}
+              value={historyIssue || undefined}
+              onChange={setHistoryIssue}
+              options={historyIssueOptions.map((x) => ({ value: x, label: x }))}
+              placeholder="选择期数"
+            />
+          </Space>
+          {historyBase === "2avatar" ? (
+            <Space wrap>
+              <span>生肖：</span>
+              <Select
+                style={{ width: 120 }}
+                value={historyZodiacInput}
+                onChange={setHistoryZodiacInput}
+                options={ZODIAC_OPTIONS.map((z) => ({ value: z, label: z }))}
+              />
+              <span>数字：</span>
+              <Input style={{ width: 140 }} value={historyNumInput} onChange={(e) => setHistoryNumInput(e.target.value)} placeholder="1-49" />
+            </Space>
+          ) : historyBase === "3avatar" ? (
+            <Space wrap>
+              <span>替换组：</span>
+              <Input style={{ width: 90 }} value={historyThreeA} onChange={(e) => setHistoryThreeA(e.target.value)} placeholder="01" />
+              <span>-</span>
+              <Input style={{ width: 90 }} value={historyThreeB} onChange={(e) => setHistoryThreeB(e.target.value)} placeholder="08" />
+              <span>-</span>
+              <Input style={{ width: 90 }} value={historyThreeC} onChange={(e) => setHistoryThreeC(e.target.value)} placeholder="15" />
+              <span style={{ color: "#999" }}>会随机替换一整组</span>
+            </Space>
+          ) : (
+            <Space wrap>
+              <span>数字：</span>
+              <Input style={{ width: 140 }} value={historyNumInput} onChange={(e) => setHistoryNumInput(e.target.value)} placeholder="1-49" />
+            </Space>
+          )}
+          <div style={{ maxHeight: 280, overflow: "auto", background: "#fafafa", padding: 10, borderRadius: 8, border: "1px solid #eee" }}>
+            <div style={{ marginBottom: 8, color: "#666" }}>
+              勾选机器人（右侧显示命中率）
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <Checkbox
+                checked={historyRowsByBase.length > 0 && historySelectedIds.length === historyRowsByBase.length}
+                indeterminate={historySelectedIds.length > 0 && historySelectedIds.length < historyRowsByBase.length}
+                onChange={(e) => {
+                  if (e.target.checked) {
+                    setHistorySelectedIds(historyRowsByBase.map((r) => r.id));
+                  } else {
+                    setHistorySelectedIds([]);
+                  }
+                }}
+              >
+                全选
+              </Checkbox>
+            </div>
+            <Checkbox.Group
+              style={{ width: "100%" }}
+              value={historySelectedIds}
+              onChange={(vals) => setHistorySelectedIds(vals)}
+            >
+              <div style={{ display: "grid", gap: 8 }}>
+                {historyRowsByBase.map((r) => (
+                  <label key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", padding: "6px 8px", borderRadius: 6 }}>
+                    <Checkbox value={r.id}>{r.name}</Checkbox>
+                    <span style={{ color: "#888" }}>命中率 {Number(r.winRate || 0)}%</span>
+                  </label>
+                ))}
+              </div>
+            </Checkbox.Group>
           </div>
-          <label>输入要替换进去的数字（1-49）</label>
-          <Input value={batchNum} onChange={(e) => setBatchNum(e.target.value)} placeholder="例如 8" />
         </div>
       </Modal>
 
