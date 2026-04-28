@@ -15,18 +15,39 @@ function nextBotIssueFromLive(liveIssue, now = new Date()) {
 
 function useAdminApi(token) {
   const withAuth = async (path, options = {}) => {
-    const res = await fetch(`${API}${path}`, {
-      cache: "no-store",
-      ...options,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        ...(options.headers || {})
+    const maxAttempts = 2;
+    let lastErr = null;
+    for (let i = 0; i < maxAttempts; i += 1) {
+      try {
+        const res = await fetch(`${API}${path}`, {
+          cache: "no-store",
+          ...options,
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+            ...(options.headers || {})
+          }
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          const err = new Error(data.message || `HTTP ${res.status}`);
+          // 后台偶发 502/503 时自动重试一次
+          if ((res.status === 502 || res.status === 503) && i + 1 < maxAttempts) {
+            await new Promise((r) => setTimeout(r, 450));
+            continue;
+          }
+          throw err;
+        }
+        return data;
+      } catch (e) {
+        lastErr = e;
+        if (i + 1 < maxAttempts) {
+          await new Promise((r) => setTimeout(r, 450));
+          continue;
+        }
       }
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
-    return data;
+    }
+    throw lastErr || new Error("请求失败");
   };
   return { withAuth };
 }

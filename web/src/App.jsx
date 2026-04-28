@@ -1014,7 +1014,7 @@ function App() {
       <div className="auth">
         <div className="auth-wrap">
           <img className="auth-banner" src="/assets/login-banner.jpg" alt="登录横幅" />
-          <h2 className="auth-title">新澳内部预测平台</h2>
+          <h2 className="auth-title">福到</h2>
         </div>
         <div className="card auth-card">
           <h3>{authMode === "login" ? "登录" : "注册"}</h3>

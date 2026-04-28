@@ -10,6 +10,8 @@ const { z } = require("zod");
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const JWT_SECRET = "dev_secret_change_me";
+const BOT_PUBLIC_ROOT = path.join(__dirname, "..", "web", "public", "bots");
+const BOT_DIST_ROOT = path.join(__dirname, "..", "web", "dist", "bots");
 
 app.use(cors());
 app.use(express.json());
@@ -791,9 +793,19 @@ function randomReplaceOnePredictionNumber(text) {
   return { changed: next !== raw, next };
 }
 
+function existingBotRoots() {
+  const roots = [BOT_DIST_ROOT, BOT_PUBLIC_ROOT].filter((p) => fs.existsSync(p));
+  return roots.length ? roots : [BOT_PUBLIC_ROOT];
+}
+
+function primaryBotRoot() {
+  const roots = existingBotRoots();
+  return roots[0];
+}
+
 app.get("/api/admin/bot-experts", ensureAuth, (req, res) => {
   const bases = ["1avatar", "2avatar", "3avatar"];
-  const root = path.join(__dirname, "..", "web", "public", "bots");
+  const root = primaryBotRoot();
   const all = [];
   for (const base of bases) {
     const dir = path.join(root, base);
@@ -832,9 +844,12 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
     return res.status(400).json({ message: "base 错误" });
   }
   if (!/^\d+\.txt$/i.test(file)) return res.status(400).json({ message: "file 错误" });
-  const p = path.join(__dirname, "..", "web", "public", "bots", base, file);
-  if (!fs.existsSync(p)) return res.status(404).json({ message: "机器人文件不存在" });
-  const old = parseBotTxtServer(fs.readFileSync(p, "utf-8"));
+  const roots = existingBotRoots();
+  const targetPath = roots
+    .map((r) => path.join(r, base, file))
+    .find((p) => fs.existsSync(p));
+  if (!targetPath) return res.status(404).json({ message: "机器人文件不存在" });
+  const old = parseBotTxtServer(fs.readFileSync(targetPath, "utf-8"));
   const next = {
     ...old,
     issue: String(req.body?.issue ?? old.issue ?? "").trim(),
@@ -846,13 +861,16 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
         })).filter((r) => r.issue)
       : old.recent10
   };
-  fs.writeFileSync(p, toBotTxtServer(next), "utf-8");
+  for (const root of roots) {
+    const p = path.join(root, base, file);
+    if (fs.existsSync(p)) fs.writeFileSync(p, toBotTxtServer(next), "utf-8");
+  }
   res.json({ message: "机器人内容已更新" });
 });
 
 app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, res) => {
   const base = "1avatar";
-  const root = path.join(__dirname, "..", "web", "public", "bots", base);
+  const root = path.join(primaryBotRoot(), base);
   const listPath = path.join(root, "list.json");
   if (!fs.existsSync(listPath)) return res.status(404).json({ message: "list.json 不存在" });
   let files = [];
@@ -872,7 +890,10 @@ app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, r
       const result = randomReplaceOnePredictionNumber(old.prediction);
       if (!result.changed) continue;
       const next = { ...old, prediction: result.next };
-      fs.writeFileSync(p, toBotTxtServer(next), "utf-8");
+      for (const botRoot of existingBotRoots()) {
+        const writePath = path.join(botRoot, base, file);
+        if (fs.existsSync(writePath)) fs.writeFileSync(writePath, toBotTxtServer(next), "utf-8");
+      }
       changed += 1;
     } catch {
       // ignore broken file
