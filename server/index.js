@@ -6,12 +6,27 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const Database = require("better-sqlite3");
 const { z } = require("zod");
+let mysqlLayer = null;
+let legacyImporter = null;
+try {
+  mysqlLayer = require("./db");
+  legacyImporter = require("./legacy-import");
+} catch {
+  mysqlLayer = null;
+  legacyImporter = null;
+}
 
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 const JWT_SECRET = "dev_secret_change_me";
 const BOT_PUBLIC_ROOT = path.join(__dirname, "..", "web", "public", "bots");
 const BOT_DIST_ROOT = path.join(__dirname, "..", "web", "dist", "bots");
+let USE_MYSQL = !!(process.env.DB_HOST || process.env.DB_CLIENT === "mysql");
+const BOOT_STATUS = {
+  mysqlEnabledByEnv: USE_MYSQL,
+  mysqlBootstrap: USE_MYSQL ? "pending" : "disabled",
+  mysqlMessage: ""
+};
 
 app.use(cors());
 app.use(express.json());
@@ -113,6 +128,8 @@ ensureColumn("users", "last_login_at", "TEXT");
 ensureColumn("users", "role", "TEXT DEFAULT 'user'");
 db.prepare("UPDATE users SET role='admin' WHERE username='admin'").run();
 db.prepare("INSERT OR IGNORE INTO app_settings(key, value) VALUES('service_wechat','')").run();
+db.prepare("INSERT OR IGNORE INTO app_settings(key, value) VALUES('reward_min','1880')").run();
+db.prepare("INSERT OR IGNORE INTO app_settings(key, value) VALUES('reward_max','2580')").run();
 
 const expertCount = db.prepare("SELECT COUNT(*) AS c FROM experts").get().c;
 if (!expertCount) {
@@ -143,24 +160,28 @@ if (!expertCount) {
   }
 }
 
-const ensureAuth = (req, res, next) => {
+const ensureAuth = async (req, res, next) => {
   const token = (req.headers.authorization || "").replace("Bearer ", "");
   if (!token) return res.status(401).json({ message: "未登录" });
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    const user = db.prepare("SELECT id, frozen FROM users WHERE id=?").get(payload.id);
+    const user = USE_MYSQL
+      ? await mysqlOne("SELECT id, frozen, role FROM users WHERE id=?", [payload.id])
+      : db.prepare("SELECT id, frozen, role FROM users WHERE id=?").get(payload.id);
     if (!user) return res.status(401).json({ message: "用户不存在" });
     if (Number(user.frozen) === 1) return res.status(403).json({ message: "账号已冻结" });
-    req.user = payload;
+    req.user = { ...payload, role: user.role || "user" };
     next();
   } catch {
     return res.status(401).json({ message: "登录已过期" });
   }
 };
 
-const ensureAdmin = (req, res, next) => {
-  const me = db.prepare("SELECT id, role FROM users WHERE id=?").get(req.user?.id);
-  const role = String(me?.role || "user");
+const ensureAdmin = async (req, res, next) => {
+  const me = USE_MYSQL
+    ? await mysqlOne("SELECT id, role FROM users WHERE id=?", [req.user?.id])
+    : db.prepare("SELECT id, role FROM users WHERE id=?").get(req.user?.id);
+  const role = String(me?.role || req.user?.role || "user");
   if (role !== "admin" && role !== "subadmin") {
     return res.status(403).json({ message: "仅后台账号可操作" });
   }
@@ -236,13 +257,20 @@ app.post("/api/auth/register", async (req, res) => {
   }
   try {
     const passwordHash = await bcrypt.hash(password, 10);
-    db.prepare("INSERT INTO users(username, password_hash, avatar, balance, role) VALUES(?,?,?,?,?)").run(
-      username,
-      passwordHash,
-      "https://i.pravatar.cc/80",
-      0,
-      "user"
-    );
+    if (USE_MYSQL) {
+      await mysqlExecute(
+        "INSERT INTO users(username, password_hash, avatar, balance, role) VALUES(?,?,?,?,?)",
+        [username, passwordHash, "https://i.pravatar.cc/80", 0, "user"]
+      );
+    } else {
+      db.prepare("INSERT INTO users(username, password_hash, avatar, balance, role) VALUES(?,?,?,?,?)").run(
+        username,
+        passwordHash,
+        "https://i.pravatar.cc/80",
+        0,
+        "user"
+      );
+    }
     res.json({ message: "注册成功" });
   } catch (e) {
     res.status(400).json({ message: "用户名已存在" });
@@ -255,14 +283,18 @@ app.post("/api/auth/login", async (req, res) => {
   const password = String(body.password || "");
   if (!account) return res.status(400).json({ message: "请输入账号" });
   if (!password || password.length < 3) return res.status(400).json({ message: "密码至少3位" });
-  const user = db
-    .prepare("SELECT * FROM users WHERE username=? OR phone=? OR email=?")
-    .get(account, account, account);
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM users WHERE username=? OR phone=? OR email=?", [account, account, account])
+    : db.prepare("SELECT * FROM users WHERE username=? OR phone=? OR email=?").get(account, account, account);
   if (!user) return res.status(400).json({ message: "用户不存在" });
   if (Number(user.frozen) === 1) return res.status(403).json({ message: "账号已冻结" });
   const ok = await bcrypt.compare(password, user.password_hash);
   if (!ok) return res.status(400).json({ message: "密码错误" });
-  db.prepare("UPDATE users SET last_login_at=? WHERE id=?").run(new Date().toISOString(), user.id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET last_login_at=? WHERE id=?", [new Date(), user.id]);
+  } else {
+    db.prepare("UPDATE users SET last_login_at=? WHERE id=?").run(new Date().toISOString(), user.id);
+  }
   const token = jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, { expiresIn: "7d" });
   res.json({
     token,
@@ -270,160 +302,342 @@ app.post("/api/auth/login", async (req, res) => {
   });
 });
 
-app.get("/api/user/me", ensureAuth, (req, res) => {
-  const user = db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
+app.get("/api/user/me", ensureAuth, async (req, res) => {
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT id, username, avatar, balance FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
   res.json(user);
 });
 
-app.get("/api/settings/service-wechat", (_req, res) => {
-  const row = db.prepare("SELECT value FROM app_settings WHERE key='service_wechat'").get();
+app.get("/api/settings/service-wechat", async (_req, res) => {
+  const row = USE_MYSQL
+    ? await mysqlOne("SELECT `value` FROM app_settings WHERE `key`='service_wechat'")
+    : db.prepare("SELECT value FROM app_settings WHERE key='service_wechat'").get();
   res.json({ wechat: String(row?.value || "") });
 });
 
-app.get("/api/user/orders", ensureAuth, (req, res) => {
-  const orders = db
-    .prepare(
-      "SELECT o.*, p.title FROM orders o LEFT JOIN predictions p ON p.id=o.prediction_id WHERE o.user_id=? ORDER BY o.id DESC"
-    )
-    .all(req.user.id);
+app.get("/api/settings/reward-range", async (_req, res) => {
+  if (USE_MYSQL) {
+    const rows = await mysqlQuery("SELECT `key`, `value` FROM app_settings WHERE `key` IN ('reward_min','reward_max')");
+    const map = {};
+    for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+    const min = Number(map.reward_min || 1880);
+    const max = Number(map.reward_max || 2580);
+    return res.json({
+      min: Number.isFinite(min) ? min : 1880,
+      max: Number.isFinite(max) ? max : 2580
+    });
+  }
+  const rows = db.prepare("SELECT key, value FROM app_settings WHERE key IN ('reward_min','reward_max')").all();
+  const map = {};
+  for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+  const min = Number(map.reward_min || 1880);
+  const max = Number(map.reward_max || 2580);
+  res.json({
+    min: Number.isFinite(min) ? min : 1880,
+    max: Number.isFinite(max) ? max : 2580
+  });
+});
+
+app.get("/api/health", async (_req, res) => {
+  const payload = {
+    ok: true,
+    mode: USE_MYSQL ? "mysql" : "sqlite_fallback",
+    mysqlEnabledByEnv: BOOT_STATUS.mysqlEnabledByEnv,
+    mysqlBootstrap: BOOT_STATUS.mysqlBootstrap,
+    mysqlMessage: BOOT_STATUS.mysqlMessage || "",
+    sqliteFileExists: fs.existsSync(path.join(__dirname, "app.db")),
+    botsFilesCount: ["1avatar", "2avatar", "3avatar"].reduce((sum, base) => sum + loadBotsFromFiles(base).length, 0),
+    counts: {
+      users: 0,
+      experts: 0,
+      predictions: 0,
+      bots: 0
+    }
+  };
+  try {
+    if (USE_MYSQL) {
+      payload.counts.users = Number((await mysqlOne("SELECT COUNT(*) AS c FROM users"))?.c || 0);
+      payload.counts.experts = Number((await mysqlOne("SELECT COUNT(*) AS c FROM experts"))?.c || 0);
+      payload.counts.predictions = Number((await mysqlOne("SELECT COUNT(*) AS c FROM predictions"))?.c || 0);
+      payload.counts.bots = Number((await mysqlOne("SELECT COUNT(*) AS c FROM bots"))?.c || 0);
+    } else {
+      payload.counts.users = Number(db.prepare("SELECT COUNT(*) AS c FROM users").get()?.c || 0);
+      payload.counts.experts = Number(db.prepare("SELECT COUNT(*) AS c FROM experts").get()?.c || 0);
+      payload.counts.predictions = Number(db.prepare("SELECT COUNT(*) AS c FROM predictions").get()?.c || 0);
+      payload.counts.bots = payload.botsFilesCount;
+    }
+  } catch (e) {
+    payload.ok = false;
+    payload.mysqlMessage = String(e?.message || e);
+  }
+  res.status(payload.ok ? 200 : 500).json(payload);
+});
+
+app.get("/api/bots/:base", async (req, res) => {
+  const base = String(req.params.base || "");
+  if (!["1avatar", "2avatar", "3avatar"].includes(base)) {
+    return res.status(400).json({ message: "base 错误" });
+  }
+  try {
+    const mysqlRows = await loadBotsFromMysql(base);
+    if (Array.isArray(mysqlRows) && mysqlRows.length) {
+      return res.json(mysqlRows);
+    }
+  } catch {
+    // MySQL 不可用时回退文件方案，保证旧部署仍可工作。
+  }
+  res.json(loadBotsFromFiles(base));
+});
+
+app.get("/api/user/orders", ensureAuth, async (req, res) => {
+  const orders = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT o.*, p.title FROM orders o LEFT JOIN predictions p ON p.id=o.prediction_id WHERE o.user_id=? ORDER BY o.id DESC",
+        [req.user.id]
+      )
+    : db
+        .prepare(
+          "SELECT o.*, p.title FROM orders o LEFT JOIN predictions p ON p.id=o.prediction_id WHERE o.user_id=? ORDER BY o.id DESC"
+        )
+        .all(req.user.id);
   res.json(orders);
 });
 
-app.get("/api/user/follows", ensureAuth, (req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT e.* FROM follows f LEFT JOIN experts e ON e.id=f.expert_id WHERE f.user_id=? ORDER BY f.id DESC"
-    )
-    .all(req.user.id);
+app.get("/api/user/follows", ensureAuth, async (req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT e.* FROM follows f LEFT JOIN experts e ON e.id=f.expert_id WHERE f.user_id=? ORDER BY f.id DESC",
+        [req.user.id]
+      )
+    : db
+        .prepare(
+          "SELECT e.* FROM follows f LEFT JOIN experts e ON e.id=f.expert_id WHERE f.user_id=? ORDER BY f.id DESC"
+        )
+        .all(req.user.id);
   res.json(rows);
 });
 
-app.get("/api/experts", ensureAuth, (req, res) => {
-  const experts = db.prepare("SELECT * FROM experts ORDER BY rank_score DESC").all();
-  const followed = db.prepare("SELECT expert_id FROM follows WHERE user_id=?").all(req.user.id).map((x) => x.expert_id);
+app.get("/api/experts", ensureAuth, async (req, res) => {
+  const experts = USE_MYSQL
+    ? await mysqlQuery("SELECT * FROM experts ORDER BY rank_score DESC")
+    : db.prepare("SELECT * FROM experts ORDER BY rank_score DESC").all();
+  const followedRows = USE_MYSQL
+    ? await mysqlQuery("SELECT expert_id FROM follows WHERE user_id=?", [req.user.id])
+    : db.prepare("SELECT expert_id FROM follows WHERE user_id=?").all(req.user.id);
+  const followed = followedRows.map((x) => x.expert_id);
   res.json(experts.map((e, idx) => ({ ...e, rank: idx + 1, followed: followed.includes(e.id) })));
 });
 
-app.post("/api/experts/:id/follow", ensureAuth, (req, res) => {
+app.post("/api/experts/:id/follow", ensureAuth, async (req, res) => {
   try {
-    db.prepare("INSERT INTO follows(user_id, expert_id) VALUES(?,?)").run(req.user.id, Number(req.params.id));
+    if (USE_MYSQL) {
+      await mysqlExecute("INSERT INTO follows(user_id, expert_id) VALUES(?,?)", [req.user.id, Number(req.params.id)]);
+    } else {
+      db.prepare("INSERT INTO follows(user_id, expert_id) VALUES(?,?)").run(req.user.id, Number(req.params.id));
+    }
     res.json({ message: "关注成功" });
   } catch {
     res.json({ message: "已关注" });
   }
 });
 
-app.delete("/api/experts/:id/follow", ensureAuth, (req, res) => {
-  db.prepare("DELETE FROM follows WHERE user_id=? AND expert_id=?").run(req.user.id, Number(req.params.id));
+app.delete("/api/experts/:id/follow", ensureAuth, async (req, res) => {
+  if (USE_MYSQL) {
+    await mysqlExecute("DELETE FROM follows WHERE user_id=? AND expert_id=?", [req.user.id, Number(req.params.id)]);
+  } else {
+    db.prepare("DELETE FROM follows WHERE user_id=? AND expert_id=?").run(req.user.id, Number(req.params.id));
+  }
   res.json({ message: "已取消关注" });
 });
 
-app.get("/api/predictions", ensureAuth, (req, res) => {
+app.get("/api/predictions", ensureAuth, async (req, res) => {
   const category = req.query.category;
-  const rows = category
-    ? db
-        .prepare(
-          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.category=? ORDER BY p.id DESC"
-        )
-        .all(category)
-    : db
-        .prepare(
-          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC"
-        )
-        .all();
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        category
+          ? "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.category=? ORDER BY p.id DESC"
+          : "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC",
+        category ? [category] : []
+      )
+    : category
+      ? db
+          .prepare(
+            "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.category=? ORDER BY p.id DESC"
+          )
+          .all(category)
+      : db
+          .prepare(
+            "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC"
+          )
+          .all();
   res.json(
-    rows.map((r) => ({
+    (rows || []).map((r) => ({
       ...r,
-      tags: JSON.parse(r.tags || "[]")
+      tags: (() => {
+        try {
+          return JSON.parse(r.tags || "[]");
+        } catch {
+          return [];
+        }
+      })()
     }))
   );
 });
 
-app.get("/api/predictions/:id", ensureAuth, (req, res) => {
-  const row = db
-    .prepare(
-      "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.id=?"
-    )
-    .get(Number(req.params.id));
+app.get("/api/predictions/:id", ensureAuth, async (req, res) => {
+  const pid = Number(req.params.id);
+  const row = USE_MYSQL
+    ? await mysqlOne(
+        "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.id=?",
+        [pid]
+      )
+    : db
+        .prepare(
+          "SELECT p.*, e.name AS expert_name, e.avatar AS expert_avatar FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id WHERE p.id=?"
+        )
+        .get(pid);
   if (!row) return res.status(404).json({ message: "内容不存在" });
-  const paid = db
-    .prepare("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'")
-    .get(req.user.id, row.id);
+  const paid = USE_MYSQL
+    ? await mysqlOne("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'", [req.user.id, row.id])
+    : db
+        .prepare("SELECT id FROM orders WHERE user_id=? AND prediction_id=? AND status='success'")
+        .get(req.user.id, row.id);
   const canRead = row.is_free === 1 || !!paid;
   res.json({
     ...row,
-    tags: JSON.parse(row.tags || "[]"),
+    tags: (() => {
+      try {
+        return JSON.parse(row.tags || "[]");
+      } catch {
+        return [];
+      }
+    })(),
     canRead,
     content: canRead ? row.content_full : null
   });
 });
 
-app.post("/api/orders/create", ensureAuth, (req, res) => {
+app.post("/api/orders/create", ensureAuth, async (req, res) => {
   const schema = z.object({ predictionId: z.number() });
   const result = schema.safeParse(req.body);
   if (!result.success) return res.status(400).json({ message: "参数错误" });
-  const prediction = db.prepare("SELECT * FROM predictions WHERE id=?").get(result.data.predictionId);
+  const prediction = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM predictions WHERE id=?", [result.data.predictionId])
+    : db.prepare("SELECT * FROM predictions WHERE id=?").get(result.data.predictionId);
   if (!prediction) return res.status(404).json({ message: "内容不存在" });
   if (prediction.is_free === 1) return res.status(400).json({ message: "免费内容无需购买" });
+  if (USE_MYSQL) {
+    const r = await mysqlExecute("INSERT INTO orders(user_id, prediction_id, amount, status) VALUES(?,?,?, 'pending')", [
+      req.user.id,
+      prediction.id,
+      prediction.price
+    ]);
+    res.json({ orderId: r?.insertId, amount: prediction.price });
+    return;
+  }
   const r = db
     .prepare("INSERT INTO orders(user_id, prediction_id, amount, status) VALUES(?,?,?, 'pending')")
     .run(req.user.id, prediction.id, prediction.price);
   res.json({ orderId: r.lastInsertRowid, amount: prediction.price });
 });
 
-app.post("/api/orders/:id/pay", ensureAuth, (req, res) => {
-  const order = db.prepare("SELECT * FROM orders WHERE id=? AND user_id=?").get(Number(req.params.id), req.user.id);
+app.post("/api/orders/:id/pay", ensureAuth, async (req, res) => {
+  const order = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM orders WHERE id=? AND user_id=?", [Number(req.params.id), req.user.id])
+    : db.prepare("SELECT * FROM orders WHERE id=? AND user_id=?").get(Number(req.params.id), req.user.id);
   if (!order) return res.status(404).json({ message: "订单不存在" });
   if (order.status === "success") return res.json({ message: "已支付" });
-  const user = db.prepare("SELECT * FROM users WHERE id=?").get(req.user.id);
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT * FROM users WHERE id=?").get(req.user.id);
   if (user.balance < order.amount) return res.status(400).json({ message: "余额不足" });
-  db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(order.amount, req.user.id);
-  db.prepare("UPDATE orders SET status='success', paid_at=? WHERE id=?").run(new Date().toISOString(), order.id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET balance=balance-? WHERE id=?", [order.amount, req.user.id]);
+    await mysqlExecute("UPDATE orders SET status='success', paid_at=? WHERE id=?", [new Date(), order.id]);
+  } else {
+    db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(order.amount, req.user.id);
+    db.prepare("UPDATE orders SET status='success', paid_at=? WHERE id=?").run(new Date().toISOString(), order.id);
+  }
   res.json({ message: "支付成功" });
 });
 
-app.post("/api/recharge", ensureAuth, (req, res) => {
+app.post("/api/recharge", ensureAuth, async (req, res) => {
   const amount = Number(req.body?.amount);
   const channel = String(req.body?.channel || "manual").trim().toLowerCase();
   if (!Number.isFinite(amount) || amount < 100) return res.status(400).json({ message: "最低充值100" });
   const ch = ["wechat", "alipay", "manual"].includes(channel) ? channel : "manual";
-  db.prepare("UPDATE users SET balance=balance+? WHERE id=?").run(amount, req.user.id);
-  db.prepare("INSERT INTO recharges(user_id, amount, channel, status) VALUES(?,?,?,?)").run(req.user.id, amount, ch, "success");
-  const user = db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET balance=balance+? WHERE id=?", [amount, req.user.id]);
+    await mysqlExecute("INSERT INTO recharges(user_id, amount, channel, status) VALUES(?,?,?,?)", [
+      req.user.id,
+      amount,
+      ch,
+      "success"
+    ]);
+  } else {
+    db.prepare("UPDATE users SET balance=balance+? WHERE id=?").run(amount, req.user.id);
+    db.prepare("INSERT INTO recharges(user_id, amount, channel, status) VALUES(?,?,?,?)").run(req.user.id, amount, ch, "success");
+  }
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT id, username, avatar, balance FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
   res.json({ message: "充值成功", user });
 });
 
-app.get("/api/bot-unlocks", ensureAuth, (req, res) => {
-  const rows = db
-    .prepare("SELECT bot_key, issue, status FROM bot_unlocks WHERE user_id=? AND status='success'")
-    .all(req.user.id);
+app.get("/api/bot-unlocks", ensureAuth, async (req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery("SELECT bot_key, issue, status FROM bot_unlocks WHERE user_id=? AND status='success'", [req.user.id])
+    : db
+        .prepare("SELECT bot_key, issue, status FROM bot_unlocks WHERE user_id=? AND status='success'")
+        .all(req.user.id);
   res.json(rows);
 });
 
-app.post("/api/bot-unlocks/purchase", ensureAuth, (req, res) => {
+app.post("/api/bot-unlocks/purchase", ensureAuth, async (req, res) => {
   const botKey = String(req.body?.botKey || "").trim();
   const issue = String(req.body?.issue || "").trim();
   const amount = Number(req.body?.amount ?? 88);
   if (!botKey || !issue) return res.status(400).json({ message: "参数错误" });
   if (!Number.isFinite(amount) || amount < 0) return res.status(400).json({ message: "金额错误" });
 
-  const existed = db
-    .prepare("SELECT id FROM bot_unlocks WHERE user_id=? AND bot_key=? AND issue=? AND status='success'")
-    .get(req.user.id, botKey, issue);
+  const existed = USE_MYSQL
+    ? await mysqlOne("SELECT id FROM bot_unlocks WHERE user_id=? AND bot_key=? AND issue=? AND status='success'", [
+        req.user.id,
+        botKey,
+        issue
+      ])
+    : db
+        .prepare("SELECT id FROM bot_unlocks WHERE user_id=? AND bot_key=? AND issue=? AND status='success'")
+        .get(req.user.id, botKey, issue);
   if (existed) return res.json({ message: "已解锁", unlocked: true });
 
-  const user = db.prepare("SELECT id, balance FROM users WHERE id=?").get(req.user.id);
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT id, balance FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT id, balance FROM users WHERE id=?").get(req.user.id);
   if (!user) return res.status(404).json({ message: "用户不存在" });
   if (Number(user.balance || 0) < amount) return res.status(400).json({ message: "余额不足" });
 
-  db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(amount, req.user.id);
-  db.prepare("INSERT INTO bot_unlocks(user_id, bot_key, issue, amount, status) VALUES(?,?,?,?, 'success')").run(
-    req.user.id,
-    botKey,
-    issue,
-    amount
-  );
-  const latest = db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET balance=balance-? WHERE id=?", [amount, req.user.id]);
+    await mysqlExecute("INSERT INTO bot_unlocks(user_id, bot_key, issue, amount, status) VALUES(?,?,?,?, 'success')", [
+      req.user.id,
+      botKey,
+      issue,
+      amount
+    ]);
+  } else {
+    db.prepare("UPDATE users SET balance=balance-? WHERE id=?").run(amount, req.user.id);
+    db.prepare("INSERT INTO bot_unlocks(user_id, bot_key, issue, amount, status) VALUES(?,?,?,?, 'success')").run(
+      req.user.id,
+      botKey,
+      issue,
+      amount
+    );
+  }
+  const latest = USE_MYSQL
+    ? await mysqlOne("SELECT id, username, avatar, balance FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT id, username, avatar, balance FROM users WHERE id=?").get(req.user.id);
   res.json({ message: "解锁成功", unlocked: true, user: latest });
 });
 
@@ -431,43 +645,98 @@ app.post("/api/bot-unlocks/purchase", ensureAuth, (req, res) => {
  * 简易后台管理接口（CRUD）
  * 说明：为演示后台使用，复用登录鉴权，不区分角色。
  * ----------------------------- */
-app.get("/api/admin/overview", ensureAuth, (_req, res) => {
-  const users = db.prepare("SELECT COUNT(*) AS c FROM users").get().c;
-  const experts = db.prepare("SELECT COUNT(*) AS c FROM experts").get().c;
-  const orders = db.prepare("SELECT COUNT(*) AS c FROM orders").get().c;
-  const paidAmount = db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE status='success'").get().total;
+app.get("/api/admin/overview", ensureAuth, ensureAdmin, async (_req, res) => {
+  const users = USE_MYSQL ? Number((await mysqlOne("SELECT COUNT(*) AS c FROM users"))?.c || 0) : db.prepare("SELECT COUNT(*) AS c FROM users").get().c;
+  const experts = USE_MYSQL ? Number((await mysqlOne("SELECT COUNT(*) AS c FROM experts"))?.c || 0) : db.prepare("SELECT COUNT(*) AS c FROM experts").get().c;
+  const orders = USE_MYSQL ? Number((await mysqlOne("SELECT COUNT(*) AS c FROM orders"))?.c || 0) : db.prepare("SELECT COUNT(*) AS c FROM orders").get().c;
+  const paidAmount = USE_MYSQL
+    ? Number((await mysqlOne("SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE status='success'"))?.total || 0)
+    : db.prepare("SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE status='success'").get().total;
   res.json({ users, experts, orders, paidAmount });
 });
 
-app.get("/api/admin/settings", ensureAuth, ensureAdmin, (_req, res) => {
-  const row = db.prepare("SELECT value FROM app_settings WHERE key='service_wechat'").get();
-  res.json({ serviceWechat: String(row?.value || "") });
+app.get("/api/admin/settings", ensureAuth, ensureAdmin, async (_req, res) => {
+  if (USE_MYSQL) {
+    const rows = await mysqlQuery(
+      "SELECT `key`, `value` FROM app_settings WHERE `key` IN ('service_wechat','reward_min','reward_max')"
+    );
+    const map = {};
+    for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+    return res.json({
+      serviceWechat: String(map.service_wechat || ""),
+      rewardMin: Number(map.reward_min || 1880),
+      rewardMax: Number(map.reward_max || 2580)
+    });
+  }
+  const rows = db.prepare("SELECT key, value FROM app_settings WHERE key IN ('service_wechat','reward_min','reward_max')").all();
+  const map = {};
+  for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+  res.json({
+    serviceWechat: String(map.service_wechat || ""),
+    rewardMin: Number(map.reward_min || 1880),
+    rewardMax: Number(map.reward_max || 2580)
+  });
 });
 
-app.put("/api/admin/settings", ensureAuth, ensureAdmin, (req, res) => {
+app.put("/api/admin/settings", ensureAuth, ensureAdmin, async (req, res) => {
   const serviceWechat = String(req.body?.serviceWechat || "").trim();
-  db.prepare("INSERT INTO app_settings(key, value) VALUES('service_wechat', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(serviceWechat);
-  res.json({ message: "设置已保存", serviceWechat });
+  const rewardMinInput = Number(req.body?.rewardMin);
+  const rewardMaxInput = Number(req.body?.rewardMax);
+  const rewardMin = Number.isFinite(rewardMinInput) ? Math.max(1, Math.floor(rewardMinInput)) : 1880;
+  const rewardMax = Number.isFinite(rewardMaxInput) ? Math.max(1, Math.floor(rewardMaxInput)) : 2580;
+  const fixedMin = Math.min(rewardMin, rewardMax);
+  const fixedMax = Math.max(rewardMin, rewardMax);
+  if (USE_MYSQL) {
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('service_wechat', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [serviceWechat]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_min', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(fixedMin)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_max', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(fixedMax)]
+    );
+  } else {
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('service_wechat', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(serviceWechat);
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_min', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(fixedMin));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_max', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(fixedMax));
+  }
+  res.json({ message: "设置已保存", serviceWechat, rewardMin: fixedMin, rewardMax: fixedMax });
 });
 
 app.post("/api/admin/change-password", ensureAuth, ensureAdmin, async (req, res) => {
   const oldPassword = String(req.body?.oldPassword || "");
   const newPassword = String(req.body?.newPassword || "");
   if (!newPassword || newPassword.length < 3) return res.status(400).json({ message: "新密码至少3位" });
-  const me = db.prepare("SELECT id, password_hash FROM users WHERE id=?").get(req.user.id);
+  const me = USE_MYSQL
+    ? await mysqlOne("SELECT id, password_hash FROM users WHERE id=?", [req.user.id])
+    : db.prepare("SELECT id, password_hash FROM users WHERE id=?").get(req.user.id);
   if (!me) return res.status(404).json({ message: "用户不存在" });
   const ok = await bcrypt.compare(oldPassword, me.password_hash);
   if (!ok) return res.status(400).json({ message: "旧密码错误" });
   const hash = await bcrypt.hash(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, req.user.id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET password_hash=? WHERE id=?", [hash, req.user.id]);
+  } else {
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, req.user.id);
+  }
   res.json({ message: "密码修改成功" });
 });
 
-app.get("/api/admin/subadmins", ensureAuth, ensureAdmin, (_req, res) => {
-  const rows = db
-    .prepare("SELECT id, username, role, frozen, created_at, last_login_at FROM users WHERE role IN ('admin','subadmin') ORDER BY id DESC")
-    .all();
+app.get("/api/admin/subadmins", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT id, username, role, frozen, created_at, last_login_at FROM users WHERE role IN ('admin','subadmin') ORDER BY id DESC"
+      )
+    : db
+        .prepare("SELECT id, username, role, frozen, created_at, last_login_at FROM users WHERE role IN ('admin','subadmin') ORDER BY id DESC")
+        .all();
   res.json(rows);
 });
 
@@ -477,16 +746,28 @@ app.post("/api/admin/subadmins", ensureAuth, ensureAdmin, async (req, res) => {
   const role = String(req.body?.role || "subadmin") === "admin" ? "admin" : "subadmin";
   if (!username) return res.status(400).json({ message: "请输入账号" });
   if (!password || password.length < 3) return res.status(400).json({ message: "密码至少3位" });
-  const exists = db.prepare("SELECT id FROM users WHERE username=?").get(username);
+  const exists = USE_MYSQL
+    ? await mysqlOne("SELECT id FROM users WHERE username=?", [username])
+    : db.prepare("SELECT id FROM users WHERE username=?").get(username);
   if (exists) return res.status(400).json({ message: "账号已存在" });
   const hash = await bcrypt.hash(password, 10);
-  db.prepare("INSERT INTO users(username, password_hash, avatar, balance, role, frozen) VALUES(?,?,?,?,?,0)").run(
-    username,
-    hash,
-    `https://i.pravatar.cc/100?u=${encodeURIComponent(username)}`,
-    0,
-    role
-  );
+  if (USE_MYSQL) {
+    await mysqlExecute("INSERT INTO users(username, password_hash, avatar, balance, role, frozen) VALUES(?,?,?,?,?,0)", [
+      username,
+      hash,
+      `https://i.pravatar.cc/100?u=${encodeURIComponent(username)}`,
+      0,
+      role
+    ]);
+  } else {
+    db.prepare("INSERT INTO users(username, password_hash, avatar, balance, role, frozen) VALUES(?,?,?,?,?,0)").run(
+      username,
+      hash,
+      `https://i.pravatar.cc/100?u=${encodeURIComponent(username)}`,
+      0,
+      role
+    );
+  }
   res.json({ message: "子账号已创建" });
 });
 
@@ -495,107 +776,169 @@ app.put("/api/admin/subadmins/:id/password", ensureAuth, ensureAdmin, async (req
   const newPassword = String(req.body?.newPassword || "");
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
   if (!newPassword || newPassword.length < 3) return res.status(400).json({ message: "新密码至少3位" });
-  const target = db.prepare("SELECT id, role FROM users WHERE id=?").get(id);
+  const target = USE_MYSQL
+    ? await mysqlOne("SELECT id, role FROM users WHERE id=?", [id])
+    : db.prepare("SELECT id, role FROM users WHERE id=?").get(id);
   if (!target || !["admin", "subadmin"].includes(String(target.role || ""))) {
     return res.status(404).json({ message: "子账号不存在" });
   }
   const hash = await bcrypt.hash(newPassword, 10);
-  db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET password_hash=? WHERE id=?", [hash, id]);
+  } else {
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, id);
+  }
   res.json({ message: "子账号密码已更新" });
 });
 
-app.get("/api/admin/users", ensureAuth, (_req, res) => {
-  const rows = db
-    .prepare("SELECT id, username, phone, email, avatar, balance, frozen, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 200")
-    .all();
+app.get("/api/admin/users", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT id, username, phone, email, avatar, balance, frozen, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 200"
+      )
+    : db
+        .prepare("SELECT id, username, phone, email, avatar, balance, frozen, created_at, last_login_at FROM users ORDER BY id DESC LIMIT 200")
+        .all();
   res.json(rows);
 });
 
-app.put("/api/admin/users/:id/balance", ensureAuth, (req, res) => {
+app.put("/api/admin/users/:id/balance", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const balance = Number(req.body?.balance);
   if (!Number.isFinite(id) || !Number.isFinite(balance) || balance < 0) {
     return res.status(400).json({ message: "参数错误" });
   }
-  db.prepare("UPDATE users SET balance=? WHERE id=?").run(balance, id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET balance=? WHERE id=?", [balance, id]);
+  } else {
+    db.prepare("UPDATE users SET balance=? WHERE id=?").run(balance, id);
+  }
   res.json({ message: "余额已更新" });
 });
 
-app.put("/api/admin/users/:id/freeze", ensureAuth, (req, res) => {
+app.put("/api/admin/users/:id/freeze", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   const frozen = Number(req.body?.frozen) ? 1 : 0;
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
-  db.prepare("UPDATE users SET frozen=? WHERE id=?").run(frozen, id);
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE users SET frozen=? WHERE id=?", [frozen, id]);
+  } else {
+    db.prepare("UPDATE users SET frozen=? WHERE id=?").run(frozen, id);
+  }
   res.json({ message: frozen ? "已冻结" : "已解冻" });
 });
 
-app.delete("/api/admin/users/:id", ensureAuth, (req, res) => {
+app.delete("/api/admin/users/:id", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
   if (id === Number(req.user?.id)) return res.status(400).json({ message: "不能删除当前登录账号" });
-  const user = db.prepare("SELECT id FROM users WHERE id=?").get(id);
+  const user = USE_MYSQL
+    ? await mysqlOne("SELECT id FROM users WHERE id=?", [id])
+    : db.prepare("SELECT id FROM users WHERE id=?").get(id);
   if (!user) return res.status(404).json({ message: "用户不存在" });
-  db.prepare("DELETE FROM follows WHERE user_id=?").run(id);
-  db.prepare("DELETE FROM orders WHERE user_id=?").run(id);
-  db.prepare("DELETE FROM recharges WHERE user_id=?").run(id);
-  db.prepare("DELETE FROM users WHERE id=?").run(id);
+  if (USE_MYSQL) {
+    await mysqlExecute("DELETE FROM follows WHERE user_id=?", [id]);
+    await mysqlExecute("DELETE FROM orders WHERE user_id=?", [id]);
+    await mysqlExecute("DELETE FROM recharges WHERE user_id=?", [id]);
+    await mysqlExecute("DELETE FROM bot_unlocks WHERE user_id=?", [id]);
+    await mysqlExecute("DELETE FROM users WHERE id=?", [id]);
+  } else {
+    db.prepare("DELETE FROM follows WHERE user_id=?").run(id);
+    db.prepare("DELETE FROM orders WHERE user_id=?").run(id);
+    db.prepare("DELETE FROM recharges WHERE user_id=?").run(id);
+    db.prepare("DELETE FROM users WHERE id=?").run(id);
+  }
   res.json({ message: "用户已删除" });
 });
 
-app.get("/api/admin/experts", ensureAuth, (_req, res) => {
-  const rows = db.prepare("SELECT * FROM experts ORDER BY id DESC LIMIT 500").all();
+app.get("/api/admin/experts", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery("SELECT * FROM experts ORDER BY id DESC LIMIT 500")
+    : db.prepare("SELECT * FROM experts ORDER BY id DESC LIMIT 500").all();
   res.json(rows);
 });
 
-app.post("/api/admin/experts", ensureAuth, (req, res) => {
+app.post("/api/admin/experts", ensureAuth, ensureAdmin, async (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return res.status(400).json({ message: "name 不能为空" });
   const avatar = String(req.body?.avatar || "").trim() || "https://i.pravatar.cc/80";
   const intro = String(req.body?.intro || "").trim();
   const rankScore = Number(req.body?.rank_score ?? 0);
+  if (USE_MYSQL) {
+    const r = await mysqlExecute("INSERT INTO experts(name, avatar, verified, rank_score, intro) VALUES(?,?,?,?,?)", [
+      name,
+      avatar,
+      1,
+      Number.isFinite(rankScore) ? rankScore : 0,
+      intro
+    ]);
+    res.json({ id: r?.insertId, message: "创建成功" });
+    return;
+  }
   const r = db
     .prepare("INSERT INTO experts(name, avatar, verified, rank_score, intro) VALUES(?,?,?,?,?)")
     .run(name, avatar, 1, Number.isFinite(rankScore) ? rankScore : 0, intro);
   res.json({ id: r.lastInsertRowid, message: "创建成功" });
 });
 
-app.put("/api/admin/experts/:id", ensureAuth, (req, res) => {
+app.put("/api/admin/experts/:id", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
-  const old = db.prepare("SELECT * FROM experts WHERE id=?").get(id);
+  const old = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM experts WHERE id=?", [id])
+    : db.prepare("SELECT * FROM experts WHERE id=?").get(id);
   if (!old) return res.status(404).json({ message: "专家不存在" });
   const name = String(req.body?.name ?? old.name).trim();
   const avatar = String(req.body?.avatar ?? old.avatar).trim();
   const intro = String(req.body?.intro ?? old.intro).trim();
   const rankScore = Number(req.body?.rank_score ?? old.rank_score);
-  db.prepare("UPDATE experts SET name=?, avatar=?, intro=?, rank_score=? WHERE id=?").run(
-    name || old.name,
-    avatar || old.avatar,
-    intro,
-    Number.isFinite(rankScore) ? rankScore : old.rank_score,
-    id
-  );
+  if (USE_MYSQL) {
+    await mysqlExecute("UPDATE experts SET name=?, avatar=?, intro=?, rank_score=? WHERE id=?", [
+      name || old.name,
+      avatar || old.avatar,
+      intro,
+      Number.isFinite(rankScore) ? rankScore : old.rank_score,
+      id
+    ]);
+  } else {
+    db.prepare("UPDATE experts SET name=?, avatar=?, intro=?, rank_score=? WHERE id=?").run(
+      name || old.name,
+      avatar || old.avatar,
+      intro,
+      Number.isFinite(rankScore) ? rankScore : old.rank_score,
+      id
+    );
+  }
   res.json({ message: "更新成功" });
 });
 
-app.delete("/api/admin/experts/:id", ensureAuth, (req, res) => {
+app.delete("/api/admin/experts/:id", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
-  db.prepare("DELETE FROM experts WHERE id=?").run(id);
-  db.prepare("DELETE FROM follows WHERE expert_id=?").run(id);
+  if (USE_MYSQL) {
+    await mysqlExecute("DELETE FROM experts WHERE id=?", [id]);
+    await mysqlExecute("DELETE FROM follows WHERE expert_id=?", [id]);
+  } else {
+    db.prepare("DELETE FROM experts WHERE id=?").run(id);
+    db.prepare("DELETE FROM follows WHERE expert_id=?").run(id);
+  }
   res.json({ message: "删除成功" });
 });
 
-app.get("/api/admin/predictions", ensureAuth, (_req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT p.*, e.name AS expert_name FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC LIMIT 1000"
-    )
-    .all();
-  res.json(rows.map((r) => ({ ...r, tags: JSON.parse(r.tags || "[]") })));
+app.get("/api/admin/predictions", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT p.*, e.name AS expert_name FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC LIMIT 1000"
+      )
+    : db
+        .prepare(
+          "SELECT p.*, e.name AS expert_name FROM predictions p LEFT JOIN experts e ON e.id=p.expert_id ORDER BY p.id DESC LIMIT 1000"
+        )
+        .all();
+  res.json((rows || []).map((r) => ({ ...r, tags: JSON.parse(r.tags || "[]") })));
 });
 
-app.post("/api/admin/predictions", ensureAuth, (req, res) => {
+app.post("/api/admin/predictions", ensureAuth, ensureAdmin, async (req, res) => {
   const title = String(req.body?.title || "").trim();
   if (!title) return res.status(400).json({ message: "title 不能为空" });
   const description = String(req.body?.description || "").trim();
@@ -609,6 +952,26 @@ app.post("/api/admin/predictions", ensureAuth, (req, res) => {
   const hitStatus = String(req.body?.hit_status || "none");
   const expertId = Number(req.body?.expert_id || 1);
   const publishedAt = new Date().toISOString();
+  if (USE_MYSQL) {
+    const r = await mysqlExecute(
+      "INSERT INTO predictions(title, description, category, tags, is_free, price, content_full, heat, hit_status, expert_id, published_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+      [
+        title,
+        description,
+        category,
+        JSON.stringify(tags),
+        isFree,
+        Number.isFinite(price) ? price : 0,
+        contentFull,
+        Number.isFinite(heat) ? heat : 0,
+        hitStatus,
+        Number.isFinite(expertId) ? expertId : 1,
+        new Date(publishedAt)
+      ]
+    );
+    res.json({ id: r?.insertId, message: "创建成功" });
+    return;
+  }
   const r = db
     .prepare(
       "INSERT INTO predictions(title, description, category, tags, is_free, price, content_full, heat, hit_status, expert_id, published_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
@@ -629,10 +992,12 @@ app.post("/api/admin/predictions", ensureAuth, (req, res) => {
   res.json({ id: r.lastInsertRowid, message: "创建成功" });
 });
 
-app.put("/api/admin/predictions/:id", ensureAuth, (req, res) => {
+app.put("/api/admin/predictions/:id", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
-  const old = db.prepare("SELECT * FROM predictions WHERE id=?").get(id);
+  const old = USE_MYSQL
+    ? await mysqlOne("SELECT * FROM predictions WHERE id=?", [id])
+    : db.prepare("SELECT * FROM predictions WHERE id=?").get(id);
   if (!old) return res.status(404).json({ message: "预测不存在" });
   const next = {
     title: String(req.body?.title ?? old.title).trim() || old.title,
@@ -646,47 +1011,77 @@ app.put("/api/admin/predictions/:id", ensureAuth, (req, res) => {
     hit_status: String(req.body?.hit_status ?? old.hit_status),
     expert_id: Number(req.body?.expert_id ?? old.expert_id)
   };
-  db.prepare(
-    "UPDATE predictions SET title=?, description=?, category=?, tags=?, is_free=?, price=?, content_full=?, heat=?, hit_status=?, expert_id=? WHERE id=?"
-  ).run(
-    next.title,
-    next.description,
-    next.category,
-    next.tags,
-    next.is_free,
-    Number.isFinite(next.price) ? next.price : old.price,
-    next.content_full,
-    Number.isFinite(next.heat) ? next.heat : old.heat,
-    next.hit_status,
-    Number.isFinite(next.expert_id) ? next.expert_id : old.expert_id,
-    id
-  );
+  if (USE_MYSQL) {
+    await mysqlExecute(
+      "UPDATE predictions SET title=?, description=?, category=?, tags=?, is_free=?, price=?, content_full=?, heat=?, hit_status=?, expert_id=? WHERE id=?",
+      [
+        next.title,
+        next.description,
+        next.category,
+        next.tags,
+        next.is_free,
+        Number.isFinite(next.price) ? next.price : old.price,
+        next.content_full,
+        Number.isFinite(next.heat) ? next.heat : old.heat,
+        next.hit_status,
+        Number.isFinite(next.expert_id) ? next.expert_id : old.expert_id,
+        id
+      ]
+    );
+  } else {
+    db.prepare(
+      "UPDATE predictions SET title=?, description=?, category=?, tags=?, is_free=?, price=?, content_full=?, heat=?, hit_status=?, expert_id=? WHERE id=?"
+    ).run(
+      next.title,
+      next.description,
+      next.category,
+      next.tags,
+      next.is_free,
+      Number.isFinite(next.price) ? next.price : old.price,
+      next.content_full,
+      Number.isFinite(next.heat) ? next.heat : old.heat,
+      next.hit_status,
+      Number.isFinite(next.expert_id) ? next.expert_id : old.expert_id,
+      id
+    );
+  }
   res.json({ message: "更新成功" });
 });
 
-app.delete("/api/admin/predictions/:id", ensureAuth, (req, res) => {
+app.delete("/api/admin/predictions/:id", ensureAuth, ensureAdmin, async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ message: "参数错误" });
-  db.prepare("DELETE FROM predictions WHERE id=?").run(id);
-  db.prepare("DELETE FROM orders WHERE prediction_id=?").run(id);
+  if (USE_MYSQL) {
+    await mysqlExecute("DELETE FROM predictions WHERE id=?", [id]);
+    await mysqlExecute("DELETE FROM orders WHERE prediction_id=?", [id]);
+  } else {
+    db.prepare("DELETE FROM predictions WHERE id=?").run(id);
+    db.prepare("DELETE FROM orders WHERE prediction_id=?").run(id);
+  }
   res.json({ message: "删除成功" });
 });
 
-app.get("/api/admin/orders", ensureAuth, (_req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT o.*, u.username, p.title FROM orders o LEFT JOIN users u ON u.id=o.user_id LEFT JOIN predictions p ON p.id=o.prediction_id ORDER BY o.id DESC LIMIT 1000"
-    )
-    .all();
+app.get("/api/admin/orders", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery(
+        "SELECT o.*, u.username, p.title FROM orders o LEFT JOIN users u ON u.id=o.user_id LEFT JOIN predictions p ON p.id=o.prediction_id ORDER BY o.id DESC LIMIT 1000"
+      )
+    : db
+        .prepare(
+          "SELECT o.*, u.username, p.title FROM orders o LEFT JOIN users u ON u.id=o.user_id LEFT JOIN predictions p ON p.id=o.prediction_id ORDER BY o.id DESC LIMIT 1000"
+        )
+        .all();
   res.json(rows);
 });
 
-app.get("/api/admin/recharges", ensureAuth, (_req, res) => {
-  const rows = db
-    .prepare(
-      "SELECT r.*, u.username FROM recharges r LEFT JOIN users u ON u.id=r.user_id ORDER BY r.id DESC LIMIT 1000"
-    )
-    .all();
+app.get("/api/admin/recharges", ensureAuth, ensureAdmin, async (_req, res) => {
+  const rows = USE_MYSQL
+    ? await mysqlQuery("SELECT r.*, u.username FROM recharges r LEFT JOIN users u ON u.id=r.user_id ORDER BY r.id DESC LIMIT 1000")
+    : db
+        .prepare(
+          "SELECT r.*, u.username FROM recharges r LEFT JOIN users u ON u.id=r.user_id ORDER BY r.id DESC LIMIT 1000"
+        )
+        .all();
   res.json(rows);
 });
 
@@ -803,6 +1198,37 @@ function primaryBotRoot() {
   return roots[0];
 }
 
+function loadBotsFromFiles(base) {
+  const dir = path.join(primaryBotRoot(), base);
+  const listPath = path.join(dir, "list.json");
+  if (!fs.existsSync(listPath)) return [];
+  let files = [];
+  try {
+    const list = JSON.parse(fs.readFileSync(listPath, "utf-8"));
+    files = Array.isArray(list?.files) ? list.files : [];
+  } catch {
+    files = [];
+  }
+  const rows = [];
+  for (const file of files) {
+    const p = path.join(dir, file);
+    if (!fs.existsSync(p)) continue;
+    try {
+      const spec = parseBotTxtServer(fs.readFileSync(p, "utf-8"));
+      rows.push({
+        id: `${base}:${file}`,
+        base,
+        file,
+        ...spec,
+        avatarBase: `/bots/${base}`
+      });
+    } catch {
+      // ignore broken file
+    }
+  }
+  return rows;
+}
+
 function writeBotSpecToRoots(base, file, spec) {
   const roots = existingBotRoots();
   let wrote = 0;
@@ -818,41 +1244,108 @@ function writeBotSpecToRoots(base, file, spec) {
   return wrote;
 }
 
-app.get("/api/admin/bot-experts", ensureAuth, (req, res) => {
-  const bases = ["1avatar", "2avatar", "3avatar"];
-  const root = primaryBotRoot();
-  const all = [];
-  for (const base of bases) {
-    const dir = path.join(root, base);
-    const listPath = path.join(dir, "list.json");
-    if (!fs.existsSync(listPath)) continue;
-    let files = [];
-    try {
-      const list = JSON.parse(fs.readFileSync(listPath, "utf-8"));
-      files = Array.isArray(list?.files) ? list.files : [];
-    } catch {
-      files = [];
-    }
-    for (const file of files) {
-      const f = path.join(dir, file);
-      if (!fs.existsSync(f)) continue;
-      try {
-        const spec = parseBotTxtServer(fs.readFileSync(f, "utf-8"));
-        all.push({
-          id: `${base}:${file}`,
-          base,
-          file,
-          ...spec
-        });
-      } catch {
-        // ignore broken file
+async function mysqlOne(sql, params = []) {
+  if (!USE_MYSQL || !mysqlLayer) return null;
+  return mysqlLayer.one(sql, params);
+}
+
+async function mysqlQuery(sql, params = []) {
+  if (!USE_MYSQL || !mysqlLayer) return null;
+  return mysqlLayer.query(sql, params);
+}
+
+async function mysqlExecute(sql, params = []) {
+  if (!USE_MYSQL || !mysqlLayer) return null;
+  return mysqlLayer.execute(sql, params);
+}
+
+async function loadBotsFromMysql(base) {
+  if (!USE_MYSQL || !mysqlLayer) return null;
+  const { query } = mysqlLayer;
+  const bots = await query(
+    `SELECT id, base, file, bot_name, robot_id, issue, title, prediction, avatar_base
+     FROM bots WHERE base=? ORDER BY id ASC`,
+    [base]
+  );
+  const ids = bots.map((b) => b.id);
+  let records = [];
+  if (ids.length) {
+    const placeholders = ids.map(() => "?").join(",");
+    records = await query(
+      `SELECT bot_id, issue, body FROM bot_past_records
+       WHERE bot_id IN (${placeholders})
+       ORDER BY bot_id ASC, CAST(issue AS UNSIGNED) DESC`,
+      ids
+    );
+  }
+  const recordsByBot = new Map();
+  for (const row of records || []) {
+    const arr = recordsByBot.get(row.bot_id) || [];
+    arr.push({ issue: String(row.issue || ""), body: String(row.body || "") });
+    recordsByBot.set(row.bot_id, arr);
+  }
+  return bots.map((b) => ({
+    id: `${b.base}:${b.file}`,
+    base: b.base,
+    file: b.file,
+    bot_name: b.bot_name,
+    robotId: b.robot_id,
+    issue: String(b.issue || ""),
+    title: String(b.title || ""),
+    prediction: String(b.prediction || ""),
+    avatarBase: String(b.avatar_base || `/bots/${b.base}`),
+    recent10: (recordsByBot.get(b.id) || []).slice(0, 10)
+  }));
+}
+
+async function saveBotToMysql(base, file, payload) {
+  if (!USE_MYSQL || !mysqlLayer) return false;
+  const { tx, execOn, oneOn } = mysqlLayer;
+  await tx(async (conn) => {
+    const bot = await oneOn(conn, `SELECT id FROM bots WHERE base=? AND file=?`, [base, file]);
+    if (!bot) throw new Error("机器人不存在");
+    await execOn(conn, `UPDATE bots SET issue=?, prediction=? WHERE id=?`, [
+      String(payload.issue || "").trim(),
+      String(payload.prediction || "").trim(),
+      bot.id
+    ]);
+    if (Array.isArray(payload.recent10)) {
+      await execOn(conn, `DELETE FROM bot_past_records WHERE bot_id=?`, [bot.id]);
+      for (const row of payload.recent10) {
+        await execOn(conn, `INSERT INTO bot_past_records(bot_id, issue, body) VALUES(?,?,?)`, [
+          bot.id,
+          String(row.issue || "").trim(),
+          String(row.body || "").trim()
+        ]);
       }
     }
+  });
+  return true;
+}
+
+app.get("/api/admin/bot-experts", ensureAuth, ensureAdmin, (req, res) => {
+  if (USE_MYSQL && mysqlLayer) {
+    Promise.all(["1avatar", "2avatar", "3avatar"].map((base) => loadBotsFromMysql(base)))
+      .then((groups) => {
+        const flat = groups.flat().filter(Boolean);
+        if (flat.length) {
+          res.json(flat);
+          return;
+        }
+        const fallback = ["1avatar", "2avatar", "3avatar"].flatMap((base) => loadBotsFromFiles(base));
+        res.json(fallback);
+      })
+      .catch(() => {
+        const fallback = ["1avatar", "2avatar", "3avatar"].flatMap((base) => loadBotsFromFiles(base));
+        res.json(fallback);
+      });
+    return;
   }
+  const all = ["1avatar", "2avatar", "3avatar"].flatMap((base) => loadBotsFromFiles(base));
   res.json(all);
 });
 
-app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
+app.put("/api/admin/bot-experts/:base/:file", ensureAuth, ensureAdmin, (req, res) => {
   try {
     const base = String(req.params.base || "");
     const file = String(req.params.file || "");
@@ -877,6 +1370,21 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
           })).filter((r) => r.issue)
         : old.recent10
     };
+    if (USE_MYSQL && mysqlLayer) {
+      saveBotToMysql(base, file, next)
+        .then(() => {
+          // MySQL 启用时也同步写回 bots 文本，避免前端/后台在回退模式下读到旧内容。
+          let wrote = 0;
+          try {
+            wrote = writeBotSpecToRoots(base, file, next);
+          } catch {
+            wrote = 0;
+          }
+          res.json({ message: "机器人内容已更新", wrote });
+        })
+        .catch((e) => res.status(500).json({ message: `机器人内容保存失败：${e.message}` }));
+      return;
+    }
     const wrote = writeBotSpecToRoots(base, file, next);
     res.json({ message: "机器人内容已更新", wrote });
   } catch (e) {
@@ -884,7 +1392,7 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
   }
 });
 
-app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, res) => {
+app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, ensureAdmin, async (_req, res) => {
   const base = "1avatar";
   const root = path.join(primaryBotRoot(), base);
   const listPath = path.join(root, "list.json");
@@ -906,7 +1414,18 @@ app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, r
       const result = randomReplaceOnePredictionNumber(old.prediction);
       if (!result.changed) continue;
       const next = { ...old, prediction: result.next };
-      writeBotSpecToRoots(base, file, next);
+      if (USE_MYSQL && mysqlLayer) {
+        try {
+          await saveBotToMysql(base, file, next);
+        } catch {
+          // ignore mysql write failure for batch task; file write still proceeds
+        }
+      }
+      try {
+        writeBotSpecToRoots(base, file, next);
+      } catch {
+        // ignore
+      }
       changed += 1;
     } catch {
       // ignore broken file
@@ -932,9 +1451,50 @@ if (serveWeb) {
   });
 }
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server listening: http://127.0.0.1:${PORT} (and http://localhost:${PORT})`);
-  if (serveWeb) {
-    console.log(`Serving web build from ${distDir}`);
+async function bootstrapAndListen() {
+  if (USE_MYSQL && mysqlLayer && legacyImporter) {
+    try {
+      await mysqlLayer.initSchema();
+      // 首次切换时导入旧 SQLite 与 bots txt；后续若已有数据则不会重复覆盖。
+      await legacyImporter.importFromLegacySqlite(path.join(__dirname, "app.db"));
+      await legacyImporter.importBotsFromTxt(false);
+      await legacyImporter.seedIfEmpty();
+      const mysqlUsers = Number((await mysqlOne("SELECT COUNT(*) AS c FROM users"))?.c || 0);
+      const mysqlBots = Number((await mysqlOne("SELECT COUNT(*) AS c FROM bots"))?.c || 0);
+      const sqliteUsers = Number(db.prepare("SELECT COUNT(*) AS c FROM users").get()?.c || 0);
+      const fileBots = ["1avatar", "2avatar", "3avatar"].reduce((sum, base) => sum + loadBotsFromFiles(base).length, 0);
+      // 如果 MySQL 自身可连通，但导入后仍然是空库，而本地旧数据明明存在，
+      // 说明迁移链路没有真正成功，这时宁可退回旧数据源，也不能让后台显示空表。
+      if ((sqliteUsers > 0 && mysqlUsers === 0) || (fileBots > 0 && mysqlBots === 0)) {
+        console.error(
+          `MySQL bootstrap incomplete, fallback to legacy data source: mysqlUsers=${mysqlUsers}, sqliteUsers=${sqliteUsers}, mysqlBots=${mysqlBots}, fileBots=${fileBots}`
+        );
+        USE_MYSQL = false;
+        BOOT_STATUS.mysqlBootstrap = "fallback";
+        BOOT_STATUS.mysqlMessage = `bootstrap incomplete (mysqlUsers=${mysqlUsers}, mysqlBots=${mysqlBots})`;
+      } else {
+        console.log(`MySQL bootstrap ready. users=${mysqlUsers}, bots=${mysqlBots}`);
+        BOOT_STATUS.mysqlBootstrap = "ready";
+        BOOT_STATUS.mysqlMessage = `users=${mysqlUsers}, bots=${mysqlBots}`;
+      }
+    } catch (e) {
+      console.error("MySQL bootstrap failed, fallback to legacy data source:", e.message);
+      // 关键兜底：如果 MySQL 初始化/导入失败，后续接口必须退回 SQLite，
+      // 否则后台会继续查一个空的或不可用的 MySQL，表现成“全部没数据”。
+      USE_MYSQL = false;
+      BOOT_STATUS.mysqlBootstrap = "fallback";
+      BOOT_STATUS.mysqlMessage = `bootstrap failed: ${e.message}`;
+    }
+  } else if (BOOT_STATUS.mysqlBootstrap === "pending") {
+    BOOT_STATUS.mysqlBootstrap = "disabled";
+    BOOT_STATUS.mysqlMessage = "mysql layer unavailable or not enabled";
   }
-});
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server listening: http://127.0.0.1:${PORT} (and http://localhost:${PORT})`);
+    if (serveWeb) {
+      console.log(`Serving web build from ${distDir}`);
+    }
+  });
+}
+
+bootstrapAndListen();

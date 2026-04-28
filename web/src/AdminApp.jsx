@@ -76,6 +76,8 @@ export default function AdminApp() {
   const [orderRecords, setOrderRecords] = useState([]);
   const [subAdmins, setSubAdmins] = useState([]);
   const [serviceWechat, setServiceWechat] = useState("");
+  const [rewardMin, setRewardMin] = useState("1880");
+  const [rewardMax, setRewardMax] = useState("2580");
   const [robotExperts, setRobotExperts] = useState([]);
   const [expertType, setExpertType] = useState("all");
   const [botEditorOpen, setBotEditorOpen] = useState(false);
@@ -214,7 +216,11 @@ export default function AdminApp() {
   };
 
   const loadRobotExperts = async () => {
-    const rows = await withAuth("/admin/bot-experts");
+    // 先保证后台编辑列表能出来，开奖接口失败时只影响胜率/红黑，不阻断整表。
+    const rows = await withAuth("/admin/bot-experts").catch(() => null);
+    if (!Array.isArray(rows)) {
+      return robotExperts;
+    }
     const liveRows = await fetchJsonRetry(`${API}/macau-jc`).catch(() => []);
     const liveIssue = String(liveRows?.[0]?.expect || "");
     const publishIssue = nextBotIssueFromLive(liveIssue, new Date());
@@ -273,6 +279,7 @@ export default function AdminApp() {
         if (prevIssue && row.issue === prevIssue) prevHit = hit;
         if (hit) hits += 1;
       }
+      // 历史接口波动时不阻断列表，未统计到开奖时仅回退成 0/待开奖展示。
       const winRate = loaded > 0 ? Math.round((hits / loaded) * 100) : 0;
       return {
         ...spec,
@@ -287,15 +294,16 @@ export default function AdminApp() {
       };
     });
     setRobotExperts(all);
+    return all;
   };
 
   const loadAll = async () => {
     if (!token) return;
     setLoading(true);
     const [o, u, od, sa, st] = await Promise.allSettled([
-      withAuth("/admin/overview"),
-      withAuth("/admin/users"),
-      withAuth("/admin/orders"),
+      withAuth("/admin/overview").catch(() => ({ users: 0, experts: 0, orders: 0, paidAmount: 0 })),
+      withAuth("/admin/users").catch(() => []),
+      withAuth("/admin/orders").catch(() => []),
       withAuth("/admin/subadmins").catch(() => []),
       withAuth("/admin/settings").catch(() => ({}))
     ]);
@@ -303,14 +311,18 @@ export default function AdminApp() {
     if (u.status === "fulfilled") setUsers(Array.isArray(u.value) ? u.value : []);
     if (od.status === "fulfilled") setOrderRecords(Array.isArray(od.value) ? od.value : []);
     if (sa.status === "fulfilled") setSubAdmins(Array.isArray(sa.value) ? sa.value : []);
-    if (st.status === "fulfilled") setServiceWechat(String(st.value?.serviceWechat || ""));
-    if (o.status === "rejected" || u.status === "rejected" || od.status === "rejected") {
-      message.warning("部分数据刷新失败，已显示可用数据");
+    if (st.status === "fulfilled") {
+      setServiceWechat(String(st.value?.serviceWechat || ""));
+      setRewardMin(String(st.value?.rewardMin ?? 1880));
+      setRewardMax(String(st.value?.rewardMax ?? 2580));
     }
     try {
-      await loadRobotExperts();
+      const botRows = await loadRobotExperts();
+      if (!Array.isArray(botRows)) {
+        setRobotExperts((prev) => prev || []);
+      }
     } catch {
-      message.warning("机器人数据刷新失败，请稍后重试");
+      setRobotExperts((prev) => prev || []);
     } finally {
       setLoading(false);
     }
@@ -379,7 +391,6 @@ export default function AdminApp() {
 
       <Space size={12} wrap style={{ marginBottom: 12 }}>
         <Card><Statistic title="用户数" value={overview?.users || 0} /></Card>
-        <Card><Statistic title="前端机器人专家数" value={robotExperts.length} /></Card>
         <Card><Statistic title="订单数" value={overview?.orders || 0} /></Card>
         <Card><Statistic title="充值总额" value={Number(overview?.paidAmount || 0).toFixed(2)} prefix="¥" /></Card>
       </Space>
@@ -407,6 +418,48 @@ export default function AdminApp() {
             }}
           >
             保存客服微信
+          </Button>
+          <span style={{ marginLeft: 10 }}>打赏随机金额区间：</span>
+          <Input
+            value={rewardMin}
+            onChange={(e) => setRewardMin(e.target.value)}
+            placeholder="最小金额"
+            style={{ width: 120 }}
+          />
+          <span>-</span>
+          <Input
+            value={rewardMax}
+            onChange={(e) => setRewardMax(e.target.value)}
+            placeholder="最大金额"
+            style={{ width: 120 }}
+          />
+          <Button
+            type="primary"
+            onClick={async () => {
+              const min = Number(rewardMin);
+              const max = Number(rewardMax);
+              if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
+                message.error("请输入有效金额区间");
+                return;
+              }
+              try {
+                const data = await withAuth("/admin/settings", {
+                  method: "PUT",
+                  body: JSON.stringify({
+                    serviceWechat: String(serviceWechat || "").trim(),
+                    rewardMin: Math.floor(min),
+                    rewardMax: Math.floor(max)
+                  })
+                });
+                setRewardMin(String(data?.rewardMin ?? Math.floor(min)));
+                setRewardMax(String(data?.rewardMax ?? Math.floor(max)));
+                message.success("打赏金额区间已保存（随机生效）");
+              } catch (e) {
+                message.error(e.message || "保存失败");
+              }
+            }}
+          >
+            保存打赏金额
           </Button>
         </Space>
       </Card>

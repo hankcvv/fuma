@@ -52,12 +52,16 @@ function hashSeedLocal(str) {
   return h >>> 0;
 }
 
-function botRewardAmount(spec) {
+function botRewardAmount(spec, rewardRange) {
   const key = `${spec?.avatarBase || ""}|${spec?.robotId || ""}|${spec?.bot_name || ""}`;
   const seed = hashSeedLocal(key);
-  const min = 1880;
-  const max = 2580;
-  return min + (seed % (max - min + 1));
+  const cfgMin = Number(rewardRange?.min);
+  const cfgMax = Number(rewardRange?.max);
+  const min = Number.isFinite(cfgMin) ? Math.max(1, Math.floor(cfgMin)) : 1880;
+  const max = Number.isFinite(cfgMax) ? Math.max(1, Math.floor(cfgMax)) : 2580;
+  const low = Math.min(min, max);
+  const high = Math.max(min, max);
+  return low + (seed % (high - low + 1));
 }
 
 function pastTimePlaceholder(index) {
@@ -168,6 +172,16 @@ function formatZodiacPaidContent(raw) {
   if (!zodiacs.length && numsDots !== "—") return numsDots;
   if (zodiacs.length && numsDots !== "—") return `${zodiacs.join("，")}\n${numsDots}`;
   return zodiacs.join("，") || "—";
+}
+
+async function fetchBotsByBase(base) {
+  const rows = await apiFetch(`${API}/bots/${base}`, { cache: "no-store" });
+  return (Array.isArray(rows) ? rows : [])
+    .map((spec) => ({
+      ...spec,
+      avatarBase: spec?.avatarBase || `/bots/${base}`
+    }))
+    .filter((x) => x?.bot_name && x?.robotId);
 }
 
 function isZodiacBot(spec) {
@@ -291,6 +305,7 @@ function App() {
   const [botUnlocks, setBotUnlocks] = useState({});
   const [serverBotUnlocks, setServerBotUnlocks] = useState({});
   const [serviceWechat, setServiceWechat] = useState("");
+  const [rewardRange, setRewardRange] = useState({ min: 1880, max: 2580 });
   /** 精选特码🔥 机器人专家（/bots/1avatar/*.txt） */
   const [botList, setBotList] = useState({ status: "idle", items: [] });
   /** 生肖特码🐴 机器人专家（/bots/2avatar/*.txt） */
@@ -437,6 +452,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    apiFetch(`${API}/settings/reward-range`)
+      .then((d) => {
+        const min = Number(d?.min);
+        const max = Number(d?.max);
+        setRewardRange({
+          min: Number.isFinite(min) ? min : 1880,
+          max: Number.isFinite(max) ? max : 2580
+        });
+      })
+      .catch(() => setRewardRange({ min: 1880, max: 2580 }));
+  }, []);
+
+  useEffect(() => {
     if (page === "detail") {
       window.scrollTo({ top: 0, left: 0, behavior: "instant" });
     }
@@ -580,25 +608,9 @@ function App() {
     }
     let cancelled = false;
     setBotList({ status: "loading", items: [] });
-    fetch("/bots/1avatar/list.json", { cache: "no-store" })
-      .then((r) => {
-        if (!r.ok) throw new Error("list");
-        return r.json();
-      })
-      .then((manifest) => {
-        const files = Array.isArray(manifest?.files) && manifest.files.length ? manifest.files : ["1.txt", "2.txt"];
-        return Promise.all(
-          files.map((name) =>
-            fetch(`/bots/1avatar/${name}`, { cache: "no-store" }).then((r) => {
-              if (!r.ok) throw new Error(name);
-              return r.text();
-            })
-          )
-        );
-      })
-      .then((texts) => {
+    fetchBotsByBase("1avatar")
+      .then((items) => {
         if (cancelled) return;
-        const items = texts.map((t) => parseBotTxt(t)).filter((x) => x?.bot_name && x?.robotId);
         setBotList({ status: "ready", items });
       })
       .catch(() => {
@@ -616,31 +628,9 @@ function App() {
     }
     let cancelled = false;
     setZodiacBotList({ status: "loading", items: [] });
-    fetch("/bots/2avatar/list.json", { cache: "no-store" })
-      .then((r) => {
-        if (!r.ok) throw new Error("list");
-        return r.json();
-      })
-      .then((manifest) => {
-        const files = Array.isArray(manifest?.files) && manifest.files.length ? manifest.files : [];
-        return Promise.all(
-          files.map((name) =>
-            fetch(`/bots/2avatar/${name}`, { cache: "no-store" }).then((r) => {
-              if (!r.ok) throw new Error(name);
-              return r.text();
-            })
-          )
-        );
-      })
-      .then((texts) => {
+    fetchBotsByBase("2avatar")
+      .then((items) => {
         if (cancelled) return;
-        const items = texts
-          .map((t) => {
-            const spec = parseBotTxt(t);
-            spec.avatarBase = "/bots/2avatar";
-            return spec;
-          })
-          .filter((x) => x?.bot_name && x?.robotId);
         setZodiacBotList({ status: "ready", items });
       })
       .catch(() => {
@@ -658,31 +648,9 @@ function App() {
     }
     let cancelled = false;
     setThreeBotList({ status: "loading", items: [] });
-    fetch("/bots/3avatar/list.json", { cache: "no-store" })
-      .then((r) => {
-        if (!r.ok) throw new Error("list");
-        return r.json();
-      })
-      .then((manifest) => {
-        const files = Array.isArray(manifest?.files) && manifest.files.length ? manifest.files : [];
-        return Promise.all(
-          files.map((name) =>
-            fetch(`/bots/3avatar/${name}`, { cache: "no-store" }).then((r) => {
-              if (!r.ok) throw new Error(name);
-              return r.text();
-            })
-          )
-        );
-      })
-      .then((texts) => {
+    fetchBotsByBase("3avatar")
+      .then((items) => {
         if (cancelled) return;
-        const items = texts
-          .map((t) => {
-            const spec = parseBotTxt(t);
-            spec.avatarBase = "/bots/3avatar";
-            return spec;
-          })
-          .filter((x) => x?.bot_name && x?.robotId);
         setThreeBotList({ status: "ready", items });
       })
       .catch(() => {
@@ -698,18 +666,7 @@ function App() {
     const loadGroup = async (base, setter) => {
       setter((prev) => (prev.status === "ready" ? prev : { status: "loading", items: prev.items || [] }));
       try {
-        const manifest = await fetch(`/bots/${base}/list.json`, { cache: "no-store" }).then((r) => r.json());
-        const files = Array.isArray(manifest?.files) ? manifest.files : [];
-        const texts = await Promise.all(
-          files.map((name) => fetch(`/bots/${base}/${name}`, { cache: "no-store" }).then((r) => r.text()))
-        );
-        const items = texts
-          .map((t) => {
-            const spec = parseBotTxt(t);
-            spec.avatarBase = `/bots/${base}`;
-            return spec;
-          })
-          .filter((x) => x?.bot_name && x?.robotId);
+        const items = await fetchBotsByBase(base);
         setter({ status: "ready", items });
       } catch {
         setter((prev) => ({ status: prev.items?.length ? "ready" : "error", items: prev.items || [] }));
@@ -835,7 +792,7 @@ function App() {
 
   const payBotAndUnlock = (spec, issue) => {
     const key = `${spec.avatarBase || ""}|${spec.robotId || ""}|${issue}`;
-    const fee = botRewardAmount(spec);
+    const fee = botRewardAmount(spec, rewardRange);
     authedFetch("/bot-unlocks/purchase", {
       method: "POST",
       body: JSON.stringify({ botKey: `${spec.avatarBase || ""}|${spec.robotId || ""}`, issue, amount: fee })
@@ -1014,7 +971,7 @@ function App() {
       <div className="auth">
         <div className="auth-wrap">
           <img className="auth-banner" src="/assets/login-banner.jpg" alt="登录横幅" />
-          <h2 className="auth-title">福到</h2>
+          <h2 className="auth-title">新澳内部系统</h2>
         </div>
         <div className="card auth-card">
           <h3>{authMode === "login" ? "登录" : "注册"}</h3>
@@ -1776,7 +1733,7 @@ function App() {
                           <p>🔒 最新一期需打赏后查看</p>
                           <p className="balance-hint">我的余额：¥{Number(me?.balance ?? 0).toFixed(2)}</p>
                           <button className="btn-pay" type="button" onClick={() => payBotAndUnlock(detail.spec, displayIssue)}>
-                            打赏查看 (+¥{botRewardAmount(detail.spec)})
+                            打赏查看 (+¥{botRewardAmount(detail.spec, rewardRange)})
                           </button>
                         </div>
                       ) : (
