@@ -52,6 +52,22 @@ function useAdminApi(token) {
   return { withAuth };
 }
 
+async function fetchJsonRetry(url, attempts = 2) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || `HTTP ${res.status}`);
+      return data;
+    } catch (e) {
+      lastErr = e;
+      if (i + 1 < attempts) await new Promise((r) => setTimeout(r, 450));
+    }
+  }
+  throw lastErr || new Error("请求失败");
+}
+
 export default function AdminApp() {
   const [token, setToken] = useState(localStorage.getItem("admin_token") || "");
   const [loading, setLoading] = useState(false);
@@ -199,7 +215,7 @@ export default function AdminApp() {
 
   const loadRobotExperts = async () => {
     const rows = await withAuth("/admin/bot-experts");
-    const liveRows = await fetch(`${API}/macau-jc`).then((r) => r.json()).catch(() => []);
+    const liveRows = await fetchJsonRetry(`${API}/macau-jc`).catch(() => []);
     const liveIssue = String(liveRows?.[0]?.expect || "");
     const publishIssue = nextBotIssueFromLive(liveIssue, new Date());
     const allIssues = new Set();
@@ -228,7 +244,7 @@ export default function AdminApp() {
           return;
         }
         try {
-          const payload = await fetch(`${API}/macau-history/${encodeURIComponent(issue)}`).then((r) => r.json());
+          const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`).catch(() => ({}));
           historyMap[issue] = Array.isArray(payload?.data) ? payload.data[0] || null : null;
         } catch {
           historyMap[issue] = null;

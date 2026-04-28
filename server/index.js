@@ -803,6 +803,21 @@ function primaryBotRoot() {
   return roots[0];
 }
 
+function writeBotSpecToRoots(base, file, spec) {
+  const roots = existingBotRoots();
+  let wrote = 0;
+  for (const root of roots) {
+    const p = path.join(root, base, file);
+    if (!fs.existsSync(p)) continue;
+    fs.writeFileSync(p, toBotTxtServer(spec), "utf-8");
+    wrote += 1;
+  }
+  if (!wrote) {
+    throw new Error("机器人文件不存在或无可写目录");
+  }
+  return wrote;
+}
+
 app.get("/api/admin/bot-experts", ensureAuth, (req, res) => {
   const bases = ["1avatar", "2avatar", "3avatar"];
   const root = primaryBotRoot();
@@ -838,34 +853,35 @@ app.get("/api/admin/bot-experts", ensureAuth, (req, res) => {
 });
 
 app.put("/api/admin/bot-experts/:base/:file", ensureAuth, (req, res) => {
-  const base = String(req.params.base || "");
-  const file = String(req.params.file || "");
-  if (!["1avatar", "2avatar", "3avatar"].includes(base)) {
-    return res.status(400).json({ message: "base 错误" });
+  try {
+    const base = String(req.params.base || "");
+    const file = String(req.params.file || "");
+    if (!["1avatar", "2avatar", "3avatar"].includes(base)) {
+      return res.status(400).json({ message: "base 错误" });
+    }
+    if (!/^\d+\.txt$/i.test(file)) return res.status(400).json({ message: "file 错误" });
+    const roots = existingBotRoots();
+    const targetPath = roots
+      .map((r) => path.join(r, base, file))
+      .find((p) => fs.existsSync(p));
+    if (!targetPath) return res.status(404).json({ message: "机器人文件不存在" });
+    const old = parseBotTxtServer(fs.readFileSync(targetPath, "utf-8"));
+    const next = {
+      ...old,
+      issue: String(req.body?.issue ?? old.issue ?? "").trim(),
+      prediction: String(req.body?.prediction ?? old.prediction ?? "").trim(),
+      recent10: Array.isArray(req.body?.recent10)
+        ? req.body.recent10.map((r) => ({
+            issue: String(r?.issue || "").trim(),
+            body: String(r?.body || "").trim()
+          })).filter((r) => r.issue)
+        : old.recent10
+    };
+    const wrote = writeBotSpecToRoots(base, file, next);
+    res.json({ message: "机器人内容已更新", wrote });
+  } catch (e) {
+    res.status(500).json({ message: `机器人内容保存失败：${e.message}` });
   }
-  if (!/^\d+\.txt$/i.test(file)) return res.status(400).json({ message: "file 错误" });
-  const roots = existingBotRoots();
-  const targetPath = roots
-    .map((r) => path.join(r, base, file))
-    .find((p) => fs.existsSync(p));
-  if (!targetPath) return res.status(404).json({ message: "机器人文件不存在" });
-  const old = parseBotTxtServer(fs.readFileSync(targetPath, "utf-8"));
-  const next = {
-    ...old,
-    issue: String(req.body?.issue ?? old.issue ?? "").trim(),
-    prediction: String(req.body?.prediction ?? old.prediction ?? "").trim(),
-    recent10: Array.isArray(req.body?.recent10)
-      ? req.body.recent10.map((r) => ({
-          issue: String(r?.issue || "").trim(),
-          body: String(r?.body || "").trim()
-        })).filter((r) => r.issue)
-      : old.recent10
-  };
-  for (const root of roots) {
-    const p = path.join(root, base, file);
-    if (fs.existsSync(p)) fs.writeFileSync(p, toBotTxtServer(next), "utf-8");
-  }
-  res.json({ message: "机器人内容已更新" });
 });
 
 app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, res) => {
@@ -890,10 +906,7 @@ app.post("/api/admin/bot-experts/1avatar/randomize-latest", ensureAuth, (_req, r
       const result = randomReplaceOnePredictionNumber(old.prediction);
       if (!result.changed) continue;
       const next = { ...old, prediction: result.next };
-      for (const botRoot of existingBotRoots()) {
-        const writePath = path.join(botRoot, base, file);
-        if (fs.existsSync(writePath)) fs.writeFileSync(writePath, toBotTxtServer(next), "utf-8");
-      }
+      writeBotSpecToRoots(base, file, next);
       changed += 1;
     } catch {
       // ignore broken file
