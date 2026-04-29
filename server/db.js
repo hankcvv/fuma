@@ -171,8 +171,16 @@ async function initSchema() {
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY uniq_bot_base_file (base, file),
-    UNIQUE KEY uniq_bot_base_robot (base, robot_id)
+    -- NOTE: robot_id 可能会在同一 base 下重复（同一头像对应多个 txt 文件）
+    -- 因此这里不再对 (base, robot_id) 做唯一约束
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
+
+  // 如果旧版本已经建了 (base, robot_id) 唯一索引，这里直接删除，避免 bootstrap 导入中断。
+  try {
+    await query(`ALTER TABLE bots DROP INDEX uniq_bot_base_robot`);
+  } catch {
+    // ignore: index may not exist yet
+  }
 
   await query(`CREATE TABLE IF NOT EXISTS bot_past_records (
     id INT PRIMARY KEY AUTO_INCREMENT,
