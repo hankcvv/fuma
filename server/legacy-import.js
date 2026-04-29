@@ -5,6 +5,26 @@ const { tx, one, execOn, oneOn, queryOn } = require("./db");
 
 const BOT_PUBLIC_ROOT = path.join(__dirname, "..", "web", "public", "bots");
 
+function toMysqlDateTime(value) {
+  if (value == null || value === "") return null;
+  if (value instanceof Date) return value;
+  const s = String(value).trim();
+  if (!s) return null;
+  // 兼容 SQLite/前端常见 ISO 时间：2026-04-28T14:26:04.680Z
+  // MySQL DATETIME 期望：YYYY-MM-DD HH:mm:ss
+  const iso = s.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})(?:\.\d+)?Z?$/);
+  if (iso) return `${iso[1]} ${iso[2]}`;
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return null;
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mi = String(d.getMinutes()).padStart(2, "0");
+  const ss = String(d.getSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+}
+
 function parseBotTxtServer(raw) {
   const text = String(raw || "").replace(/^\uFEFF/, "");
   const recentSplit = text.split(/^recent10\s*[:：]?\s*$/im);
@@ -183,8 +203,8 @@ async function importFromLegacySqlite(sqlitePath) {
             Number(u.balance || 0),
             Number(u.frozen || 0),
             u.role || "user",
-            u.last_login_at || null,
-            u.created_at || new Date()
+            toMysqlDateTime(u.last_login_at),
+            toMysqlDateTime(u.created_at) || new Date()
           ]
         );
       }
@@ -193,7 +213,7 @@ async function importFromLegacySqlite(sqlitePath) {
         await execOn(conn, `INSERT INTO experts(id, name, avatar, verified, rank_score, intro, created_at)
           VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE name=VALUES(name), avatar=VALUES(avatar), verified=VALUES(verified),
           rank_score=VALUES(rank_score), intro=VALUES(intro)`, [
-          e.id, e.name, e.avatar || null, Number(e.verified || 0), Number(e.rank_score || 0), e.intro || null, e.created_at || new Date()
+          e.id, e.name, e.avatar || null, Number(e.verified || 0), Number(e.rank_score || 0), e.intro || null, toMysqlDateTime(e.created_at) || new Date()
         ]);
       }
       const predictions = legacy.prepare("SELECT * FROM predictions").all();
@@ -203,30 +223,30 @@ async function importFromLegacySqlite(sqlitePath) {
           category=VALUES(category), tags=VALUES(tags), is_free=VALUES(is_free), price=VALUES(price), content_full=VALUES(content_full),
           heat=VALUES(heat), hit_status=VALUES(hit_status), expert_id=VALUES(expert_id), published_at=VALUES(published_at)`, [
           p.id, p.title, p.description || null, p.category || null, p.tags || "[]", Number(p.is_free || 0), Number(p.price || 0),
-          p.content_full || null, Number(p.heat || 0), p.hit_status || "none", p.expert_id || null, p.published_at || null, p.created_at || new Date()
+          p.content_full || null, Number(p.heat || 0), p.hit_status || "none", p.expert_id || null, toMysqlDateTime(p.published_at), toMysqlDateTime(p.created_at) || new Date()
         ]);
       }
       for (const row of legacy.prepare("SELECT * FROM follows").all()) {
         await execOn(conn, `INSERT IGNORE INTO follows(id, user_id, expert_id, created_at) VALUES(?,?,?,?)`, [
-          row.id, row.user_id, row.expert_id, row.created_at || new Date()
+          row.id, row.user_id, row.expert_id, toMysqlDateTime(row.created_at) || new Date()
         ]);
       }
       for (const row of legacy.prepare("SELECT * FROM orders").all()) {
         await execOn(conn, `INSERT INTO orders(id, user_id, prediction_id, amount, status, paid_at, created_at)
           VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE amount=VALUES(amount), status=VALUES(status), paid_at=VALUES(paid_at)`, [
-          row.id, row.user_id, row.prediction_id, Number(row.amount || 0), row.status || "pending", row.paid_at || null, row.created_at || new Date()
+          row.id, row.user_id, row.prediction_id, Number(row.amount || 0), row.status || "pending", toMysqlDateTime(row.paid_at), toMysqlDateTime(row.created_at) || new Date()
         ]);
       }
       for (const row of legacy.prepare("SELECT * FROM recharges").all()) {
         await execOn(conn, `INSERT INTO recharges(id, user_id, amount, channel, status, created_at)
           VALUES(?,?,?,?,?,?) ON DUPLICATE KEY UPDATE amount=VALUES(amount), channel=VALUES(channel), status=VALUES(status)`, [
-          row.id, row.user_id, Number(row.amount || 0), row.channel || "manual", row.status || "success", row.created_at || new Date()
+          row.id, row.user_id, Number(row.amount || 0), row.channel || "manual", row.status || "success", toMysqlDateTime(row.created_at) || new Date()
         ]);
       }
       for (const row of legacy.prepare("SELECT * FROM bot_unlocks").all()) {
         await execOn(conn, `INSERT IGNORE INTO bot_unlocks(id, user_id, bot_key, issue, amount, status, created_at)
           VALUES(?,?,?,?,?,?,?)`, [
-          row.id, row.user_id, row.bot_key, row.issue, Number(row.amount || 0), row.status || "success", row.created_at || new Date()
+          row.id, row.user_id, row.bot_key, row.issue, Number(row.amount || 0), row.status || "success", toMysqlDateTime(row.created_at) || new Date()
         ]);
       }
       for (const row of legacy.prepare("SELECT * FROM app_settings").all()) {
