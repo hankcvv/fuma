@@ -170,7 +170,7 @@ async function initSchema() {
     avatar_base VARCHAR(64) NOT NULL,
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    UNIQUE KEY uniq_bot_base_file (base, file),
+    UNIQUE KEY uniq_bot_base_file (base, file)
     -- NOTE: robot_id 可能会在同一 base 下重复（同一头像对应多个 txt 文件）
     -- 因此这里不再对 (base, robot_id) 做唯一约束
   ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`);
