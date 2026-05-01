@@ -317,26 +317,41 @@ app.get("/api/settings/service-wechat", async (_req, res) => {
 });
 
 app.get("/api/settings/reward-range", async (_req, res) => {
+  const parseRangeMap = (map) => {
+    const readPair = (minKey, maxKey, dMin = 1880, dMax = 2580) => {
+      const min = Number(map[minKey] ?? dMin);
+      const max = Number(map[maxKey] ?? dMax);
+      const lo = Number.isFinite(min) ? Math.floor(min) : dMin;
+      const hi = Number.isFinite(max) ? Math.floor(max) : dMax;
+      return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+    };
+    const legacy = readPair("reward_min", "reward_max", 1880, 2580);
+    return {
+      min: legacy.min,
+      max: legacy.max,
+      ranges: {
+        "1avatar": readPair("reward_min_1avatar", "reward_max_1avatar", legacy.min, legacy.max),
+        "2avatar": readPair("reward_min_2avatar", "reward_max_2avatar", legacy.min, legacy.max),
+        "3avatar": readPair("reward_min_3avatar", "reward_max_3avatar", legacy.min, legacy.max)
+      }
+    };
+  };
   if (USE_MYSQL) {
-    const rows = await mysqlQuery("SELECT `key`, `value` FROM app_settings WHERE `key` IN ('reward_min','reward_max')");
+    const rows = await mysqlQuery(
+      "SELECT `key`, `value` FROM app_settings WHERE `key` IN ('reward_min','reward_max','reward_min_1avatar','reward_max_1avatar','reward_min_2avatar','reward_max_2avatar','reward_min_3avatar','reward_max_3avatar')"
+    );
     const map = {};
     for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
-    const min = Number(map.reward_min || 1880);
-    const max = Number(map.reward_max || 2580);
-    return res.json({
-      min: Number.isFinite(min) ? min : 1880,
-      max: Number.isFinite(max) ? max : 2580
-    });
+    return res.json(parseRangeMap(map));
   }
-  const rows = db.prepare("SELECT key, value FROM app_settings WHERE key IN ('reward_min','reward_max')").all();
+  const rows = db
+    .prepare(
+      "SELECT key, value FROM app_settings WHERE key IN ('reward_min','reward_max','reward_min_1avatar','reward_max_1avatar','reward_min_2avatar','reward_max_2avatar','reward_min_3avatar','reward_max_3avatar')"
+    )
+    .all();
   const map = {};
   for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
-  const min = Number(map.reward_min || 1880);
-  const max = Number(map.reward_max || 2580);
-  res.json({
-    min: Number.isFinite(min) ? min : 1880,
-    max: Number.isFinite(max) ? max : 2580
-  });
+  res.json(parseRangeMap(map));
 });
 
 app.get("/api/health", async (_req, res) => {
@@ -656,25 +671,52 @@ app.get("/api/admin/overview", ensureAuth, ensureAdmin, async (_req, res) => {
 });
 
 app.get("/api/admin/settings", ensureAuth, ensureAdmin, async (_req, res) => {
+  const parseRangeMap = (map) => {
+    const readPair = (minKey, maxKey, dMin = 1880, dMax = 2580) => {
+      const min = Number(map[minKey] ?? dMin);
+      const max = Number(map[maxKey] ?? dMax);
+      const lo = Number.isFinite(min) ? Math.floor(min) : dMin;
+      const hi = Number.isFinite(max) ? Math.floor(max) : dMax;
+      return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+    };
+    const legacy = readPair("reward_min", "reward_max", 1880, 2580);
+    return {
+      rewardMin: legacy.min,
+      rewardMax: legacy.max,
+      rewardRanges: {
+        "1avatar": readPair("reward_min_1avatar", "reward_max_1avatar", legacy.min, legacy.max),
+        "2avatar": readPair("reward_min_2avatar", "reward_max_2avatar", legacy.min, legacy.max),
+        "3avatar": readPair("reward_min_3avatar", "reward_max_3avatar", legacy.min, legacy.max)
+      }
+    };
+  };
   if (USE_MYSQL) {
     const rows = await mysqlQuery(
-      "SELECT `key`, `value` FROM app_settings WHERE `key` IN ('service_wechat','reward_min','reward_max')"
+      "SELECT `key`, `value` FROM app_settings WHERE `key` IN ('service_wechat','reward_min','reward_max','reward_min_1avatar','reward_max_1avatar','reward_min_2avatar','reward_max_2avatar','reward_min_3avatar','reward_max_3avatar')"
     );
     const map = {};
     for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+    const parsed = parseRangeMap(map);
     return res.json({
       serviceWechat: String(map.service_wechat || ""),
-      rewardMin: Number(map.reward_min || 1880),
-      rewardMax: Number(map.reward_max || 2580)
+      rewardMin: parsed.rewardMin,
+      rewardMax: parsed.rewardMax,
+      rewardRanges: parsed.rewardRanges
     });
   }
-  const rows = db.prepare("SELECT key, value FROM app_settings WHERE key IN ('service_wechat','reward_min','reward_max')").all();
+  const rows = db
+    .prepare(
+      "SELECT key, value FROM app_settings WHERE key IN ('service_wechat','reward_min','reward_max','reward_min_1avatar','reward_max_1avatar','reward_min_2avatar','reward_max_2avatar','reward_min_3avatar','reward_max_3avatar')"
+    )
+    .all();
   const map = {};
   for (const r of rows || []) map[String(r.key || "")] = String(r.value || "");
+  const parsed = parseRangeMap(map);
   res.json({
     serviceWechat: String(map.service_wechat || ""),
-    rewardMin: Number(map.reward_min || 1880),
-    rewardMax: Number(map.reward_max || 2580)
+    rewardMin: parsed.rewardMin,
+    rewardMax: parsed.rewardMax,
+    rewardRanges: parsed.rewardRanges
   });
 });
 
@@ -686,6 +728,20 @@ app.put("/api/admin/settings", ensureAuth, ensureAdmin, async (req, res) => {
   const rewardMax = Number.isFinite(rewardMaxInput) ? Math.max(1, Math.floor(rewardMaxInput)) : 2580;
   const fixedMin = Math.min(rewardMin, rewardMax);
   const fixedMax = Math.max(rewardMin, rewardMax);
+  const bodyRanges = req.body?.rewardRanges && typeof req.body.rewardRanges === "object" ? req.body.rewardRanges : {};
+  const readBaseRange = (base) => {
+    const raw = bodyRanges?.[base] || {};
+    const min = Number(raw?.min);
+    const max = Number(raw?.max);
+    const lo = Number.isFinite(min) ? Math.max(1, Math.floor(min)) : fixedMin;
+    const hi = Number.isFinite(max) ? Math.max(1, Math.floor(max)) : fixedMax;
+    return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+  };
+  const perBase = {
+    "1avatar": readBaseRange("1avatar"),
+    "2avatar": readBaseRange("2avatar"),
+    "3avatar": readBaseRange("3avatar")
+  };
   if (USE_MYSQL) {
     await mysqlExecute(
       "INSERT INTO app_settings(`key`, `value`) VALUES('service_wechat', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
@@ -699,6 +755,30 @@ app.put("/api/admin/settings", ensureAuth, ensureAdmin, async (req, res) => {
       "INSERT INTO app_settings(`key`, `value`) VALUES('reward_max', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
       [String(fixedMax)]
     );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_min_1avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["1avatar"].min)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_max_1avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["1avatar"].max)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_min_2avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["2avatar"].min)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_max_2avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["2avatar"].max)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_min_3avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["3avatar"].min)]
+    );
+    await mysqlExecute(
+      "INSERT INTO app_settings(`key`, `value`) VALUES('reward_max_3avatar', ?) ON DUPLICATE KEY UPDATE `value`=VALUES(`value`)",
+      [String(perBase["3avatar"].max)]
+    );
   } else {
     db.prepare("INSERT INTO app_settings(key, value) VALUES('service_wechat', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(serviceWechat);
@@ -706,8 +786,20 @@ app.put("/api/admin/settings", ensureAuth, ensureAdmin, async (req, res) => {
       .run(String(fixedMin));
     db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_max', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
       .run(String(fixedMax));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_min_1avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["1avatar"].min));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_max_1avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["1avatar"].max));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_min_2avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["2avatar"].min));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_max_2avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["2avatar"].max));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_min_3avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["3avatar"].min));
+    db.prepare("INSERT INTO app_settings(key, value) VALUES('reward_max_3avatar', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(String(perBase["3avatar"].max));
   }
-  res.json({ message: "设置已保存", serviceWechat, rewardMin: fixedMin, rewardMax: fixedMax });
+  res.json({ message: "设置已保存", serviceWechat, rewardMin: fixedMin, rewardMax: fixedMax, rewardRanges: perBase });
 });
 
 app.post("/api/admin/change-password", ensureAuth, ensureAdmin, async (req, res) => {
@@ -1144,7 +1236,7 @@ function toBotTxtServer(spec) {
     "",
     "recent10:"
   ];
-  const recent = Array.isArray(spec.recent10) ? spec.recent10.slice(0, 10) : [];
+  const recent = Array.isArray(spec.recent10) ? spec.recent10.slice(0, 5) : [];
   for (const r of recent) {
     lines.push(`issue: ${String(r.issue || "").trim()}`);
     if (String(r.body || "").trim()) lines.push(String(r.body || "").trim());
@@ -1294,7 +1386,7 @@ async function loadBotsFromMysql(base) {
     title: String(b.title || ""),
     prediction: String(b.prediction || ""),
     avatarBase: String(b.avatar_base || `/bots/${b.base}`),
-    recent10: (recordsByBot.get(b.id) || []).slice(0, 10)
+    recent10: (recordsByBot.get(b.id) || []).slice(0, 5)
   }));
 }
 
@@ -1311,7 +1403,7 @@ async function saveBotToMysql(base, file, payload) {
     ]);
     if (Array.isArray(payload.recent10)) {
       await execOn(conn, `DELETE FROM bot_past_records WHERE bot_id=?`, [bot.id]);
-      for (const row of payload.recent10) {
+      for (const row of payload.recent10.slice(0, 5)) {
         await execOn(conn, `INSERT INTO bot_past_records(bot_id, issue, body) VALUES(?,?,?)`, [
           bot.id,
           String(row.issue || "").trim(),
@@ -1367,7 +1459,7 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, ensureAdmin, (req, res
         ? req.body.recent10.map((r) => ({
             issue: String(r?.issue || "").trim(),
             body: String(r?.body || "").trim()
-          })).filter((r) => r.issue)
+          })).filter((r) => r.issue).slice(0, 5)
         : old.recent10
     };
     if (USE_MYSQL && mysqlLayer) {

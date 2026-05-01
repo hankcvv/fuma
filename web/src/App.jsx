@@ -3,6 +3,7 @@ import { botAvatarUrl, getBotRuntime, getCurrentBotIssue, parseBotTxt, resolveBo
 
 /** 开发走 Vite 代理到后端；生产可构建前设置 VITE_API_URL */
 const API = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
+const BOT_PAST_PERIODS = 5;
 
 async function readJsonResponse(res) {
   const text = await res.text();
@@ -52,16 +53,31 @@ function hashSeedLocal(str) {
   return h >>> 0;
 }
 
-function botRewardAmount(spec, rewardRange) {
-  const key = `${spec?.avatarBase || ""}|${spec?.robotId || ""}|${spec?.bot_name || ""}`;
-  const seed = hashSeedLocal(key);
-  const cfgMin = Number(rewardRange?.min);
-  const cfgMax = Number(rewardRange?.max);
+function readPersistedJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function botRewardAmount(spec, rewardRanges) {
+  const basePath = String(spec?.avatarBase || "");
+  const base = basePath.includes("2avatar")
+    ? "2avatar"
+    : basePath.includes("3avatar")
+      ? "3avatar"
+      : "1avatar";
+  const cfg = rewardRanges?.[base] || rewardRanges?.default || { min: 1880, max: 2580 };
+  const cfgMin = Number(cfg?.min);
+  const cfgMax = Number(cfg?.max);
   const min = Number.isFinite(cfgMin) ? Math.max(1, Math.floor(cfgMin)) : 1880;
   const max = Number.isFinite(cfgMax) ? Math.max(1, Math.floor(cfgMax)) : 2580;
   const low = Math.min(min, max);
   const high = Math.max(min, max);
-  return low + (seed % (high - low + 1));
+  const mid = Math.round((low + high) / 2);
+  return Math.max(10, Math.floor(mid / 10) * 10);
 }
 
 function pastTimePlaceholder(index) {
@@ -346,6 +362,7 @@ function App() {
   })();
   const [token, setToken] = useState(localStorage.getItem("token") || "");
   const [authMode, setAuthMode] = useState("login");
+  const [postLoginPage, setPostLoginPage] = useState("home");
   const [page, setPage] = useState("home");
   const [tabs, setTabs] = useState("精选特码🔥");
   const [predictions, setPredictions] = useState([]);
@@ -364,18 +381,22 @@ function App() {
   const [msg, setMsg] = useState("");
   const [payToast, setPayToast] = useState("");
   const [serviceToast, setServiceToast] = useState("");
-  const [expertFollows, setExpertFollows] = useState({});
-  const [expertHistoryLoading, setExpertHistoryLoading] = useState(false);
+  const [expertFollows, setExpertFollows] = useState(() => readPersistedJson("expertFollows", {}));
   const [complaintForm, setComplaintForm] = useState({ content: "", contact: "", type: "其他问题" });
   const [pwdForm, setPwdForm] = useState({ oldPwd: "", newPwd: "", confirmPwd: "" });
   const [showRewardRecords, setShowRewardRecords] = useState(false);
-  const [hiddenFollowNames, setHiddenFollowNames] = useState([]);
+  const [hiddenFollowNames, setHiddenFollowNames] = useState(() => readPersistedJson("hiddenFollowNames", []));
   const [rechargeAmount, setRechargeAmount] = useState("");
   const [rechargeMethod, setRechargeMethod] = useState("wechat");
-  const [botUnlocks, setBotUnlocks] = useState({});
+  const [botUnlocks, setBotUnlocks] = useState(() => readPersistedJson("botUnlocks", {}));
   const [serverBotUnlocks, setServerBotUnlocks] = useState({});
   const [serviceWechat, setServiceWechat] = useState("");
-  const [rewardRange, setRewardRange] = useState({ min: 1880, max: 2580 });
+  const [rewardRanges, setRewardRanges] = useState({
+    default: { min: 1880, max: 2580 },
+    "1avatar": { min: 1880, max: 2580 },
+    "2avatar": { min: 1880, max: 2580 },
+    "3avatar": { min: 1880, max: 2580 }
+  });
   /** 精选特码🔥 机器人专家（/bots/1avatar/*.txt） */
   const [botList, setBotList] = useState({ status: "idle", items: [] });
   /** 生肖特码🐴 机器人专家（/bots/2avatar/*.txt） */
@@ -436,67 +457,39 @@ function App() {
   }, [token, tabs, nowTick]);
 
   useEffect(() => {
+    if (token) return;
+    const authOnlyPages = ["mineDisclaimer", "mineComplaint", "mineSettings", "mineChangePwd", "recharge"];
+    if (authOnlyPages.includes(page)) setPage("home");
+  }, [token, page]);
+
+  useEffect(() => {
     const id = setInterval(() => setNowTick(new Date()), 30_000);
     return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
-    const key = me?.username ? `expertFollows:${me.username}` : "";
-    if (!key) return;
     try {
-      localStorage.setItem(key, JSON.stringify(expertFollows || {}));
+      localStorage.setItem("expertFollows", JSON.stringify(expertFollows || {}));
     } catch {
       // ignore storage write failures
     }
-  }, [expertFollows, me?.username]);
+  }, [expertFollows]);
 
   useEffect(() => {
-    const key = me?.username ? `hiddenFollowNames:${me.username}` : "";
-    if (!key) return;
     try {
-      localStorage.setItem(key, JSON.stringify(hiddenFollowNames || []));
+      localStorage.setItem("hiddenFollowNames", JSON.stringify(hiddenFollowNames || []));
     } catch {
       // ignore storage write failures
     }
-  }, [hiddenFollowNames, me?.username]);
+  }, [hiddenFollowNames]);
 
   useEffect(() => {
-    const key = me?.username ? `botUnlocks:${me.username}` : "";
-    if (!key) return;
     try {
-      localStorage.setItem(key, JSON.stringify(botUnlocks || {}));
+      localStorage.setItem("botUnlocks", JSON.stringify(botUnlocks || {}));
     } catch {
       // ignore storage write failures
     }
-  }, [botUnlocks, me?.username]);
-
-  useEffect(() => {
-    const user = me?.username;
-    if (!user) {
-      setExpertFollows({});
-      setHiddenFollowNames([]);
-      setBotUnlocks({});
-      return;
-    }
-    try {
-      const fRaw = localStorage.getItem(`expertFollows:${user}`);
-      setExpertFollows(fRaw ? JSON.parse(fRaw) : {});
-    } catch {
-      setExpertFollows({});
-    }
-    try {
-      const hRaw = localStorage.getItem(`hiddenFollowNames:${user}`);
-      setHiddenFollowNames(hRaw ? JSON.parse(hRaw) : []);
-    } catch {
-      setHiddenFollowNames([]);
-    }
-    try {
-      const bRaw = localStorage.getItem(`botUnlocks:${user}`);
-      setBotUnlocks(bRaw ? JSON.parse(bRaw) : {});
-    } catch {
-      setBotUnlocks({});
-    }
-  }, [me?.username]);
+  }, [botUnlocks]);
 
   useEffect(() => {
     if (!token) {
@@ -524,14 +517,30 @@ function App() {
   useEffect(() => {
     apiFetch(`${API}/settings/reward-range`)
       .then((d) => {
-        const min = Number(d?.min);
-        const max = Number(d?.max);
-        setRewardRange({
-          min: Number.isFinite(min) ? min : 1880,
-          max: Number.isFinite(max) ? max : 2580
+        const defMin = Number(d?.min);
+        const defMax = Number(d?.max);
+        const fallback = {
+          min: Number.isFinite(defMin) ? defMin : 1880,
+          max: Number.isFinite(defMax) ? defMax : 2580
+        };
+        const r1 = d?.ranges?.["1avatar"] || fallback;
+        const r2 = d?.ranges?.["2avatar"] || fallback;
+        const r3 = d?.ranges?.["3avatar"] || fallback;
+        setRewardRanges({
+          default: fallback,
+          "1avatar": { min: Number(r1.min || fallback.min), max: Number(r1.max || fallback.max) },
+          "2avatar": { min: Number(r2.min || fallback.min), max: Number(r2.max || fallback.max) },
+          "3avatar": { min: Number(r3.min || fallback.min), max: Number(r3.max || fallback.max) }
         });
       })
-      .catch(() => setRewardRange({ min: 1880, max: 2580 }));
+      .catch(() =>
+        setRewardRanges({
+          default: { min: 1880, max: 2580 },
+          "1avatar": { min: 1880, max: 2580 },
+          "2avatar": { min: 1880, max: 2580 },
+          "3avatar": { min: 1880, max: 2580 }
+        })
+      );
   }, []);
 
   useEffect(() => {
@@ -542,11 +551,10 @@ function App() {
 
   useEffect(() => {
     const needMacau =
-      !!token &&
-      ((tabs === "精选特码🔥" || tabs === "生肖特码🐴" || tabs === "精选三中三💯") ||
-        page === "experts" ||
-        page === "expertDetail" ||
-        (page === "detail" && detail?.kind === "bot"));
+      (tabs === "精选特码🔥" || tabs === "生肖特码🐴" || tabs === "精选三中三💯") ||
+      page === "experts" ||
+      page === "expertDetail" ||
+      (page === "detail" && detail?.kind === "bot");
     if (!needMacau) {
       setMacauRows({ status: "idle", rows: [] });
       return;
@@ -570,7 +578,7 @@ function App() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [token, tabs, page, detail?.kind]);
+  }, [tabs, page, detail?.kind]);
 
   useEffect(() => {
     if (!token || page !== "detail" || detail?.kind !== "bot") return;
@@ -632,47 +640,8 @@ function App() {
   }, [token, page, expertDetail, nowTick, macauHistoryMap]);
 
   useEffect(() => {
-    if (!token || page !== "experts") return;
-    const allSpecs = [...(botList.items || []), ...(zodiacBotList.items || []), ...(threeBotList.items || [])];
-    if (!allSpecs.length) return;
-    const expects = [];
-    for (const spec of allSpecs) {
-      expects.push(...buildExpertPeriodRows(spec).map((r) => r.issue));
-    }
-    const uniqueExpects = [...new Set(expects.filter(Boolean))];
-    const pending = uniqueExpects.filter((exp) => !(exp in macauHistoryMap));
-    if (!pending.length) return;
-    let cancelled = false;
-    setExpertHistoryLoading(true);
-    Promise.all(
-      pending.map((exp) =>
-        fetch(`${API}/macau-history/${encodeURIComponent(exp)}`)
-          .then((r) => r.json())
-          .then((payload) => {
-            const row = Array.isArray(payload?.data) ? payload.data[0] || null : null;
-            return [exp, row];
-          })
-          .catch(() => [exp, null])
-      )
-    )
-      .then((pairs) => {
-        if (cancelled) return;
-        setMacauHistoryMap((prev) => {
-          const next = { ...prev };
-          for (const [exp, row] of pairs) next[exp] = row;
-          return next;
-        });
-      })
-      .finally(() => {
-        if (!cancelled) setExpertHistoryLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [token, page, botList.items, zodiacBotList.items, threeBotList.items, nowTick, macauHistoryMap]);
-
-  useEffect(() => {
-    if (!token || tabs !== "精选特码🔥") {
+    if (page !== "home") return;
+    if (tabs !== "精选特码🔥") {
       setBotList({ status: "idle", items: [] });
       return;
     }
@@ -689,10 +658,11 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, tabs, nowTick]);
+  }, [page, tabs, nowTick]);
 
   useEffect(() => {
-    if (!token || tabs !== "生肖特码🐴") {
+    if (page !== "home") return;
+    if (tabs !== "生肖特码🐴") {
       setZodiacBotList({ status: "idle", items: [] });
       return;
     }
@@ -709,10 +679,11 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, tabs, nowTick]);
+  }, [page, tabs, nowTick]);
 
   useEffect(() => {
-    if (!token || tabs !== "精选三中三💯") {
+    if (page !== "home") return;
+    if (tabs !== "精选三中三💯") {
       setThreeBotList({ status: "idle", items: [] });
       return;
     }
@@ -729,10 +700,10 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, tabs, nowTick]);
+  }, [page, tabs, nowTick]);
 
   useEffect(() => {
-    if (!token || page !== "experts") return;
+    if (page !== "experts") return;
     const loadGroup = async (base, setter) => {
       setter((prev) => (prev.status === "ready" ? prev : { status: "loading", items: prev.items || [] }));
       try {
@@ -745,7 +716,7 @@ function App() {
     if (botList.status !== "ready") loadGroup("1avatar", setBotList);
     if (zodiacBotList.status !== "ready") loadGroup("2avatar", setZodiacBotList);
     if (threeBotList.status !== "ready") loadGroup("3avatar", setThreeBotList);
-  }, [token, page]);
+  }, [page]);
 
   const submitAuth = async () => {
     try {
@@ -796,13 +767,40 @@ function App() {
       localStorage.setItem("token", data.token);
       setToken(data.token);
       setMsg("登录成功");
+      setPage(postLoginPage || "home");
     } catch (e) {
       setMsg(e.message);
     }
   };
 
+  const doLogout = () => {
+    localStorage.removeItem("token");
+    setToken("");
+    setAuthMode("login");
+    setMsg("已退出登录");
+    setPage("home");
+    setMe(null);
+    setOrders([]);
+    setFollows([]);
+    setDetail(null);
+    setExpertDetail(null);
+    setServerBotUnlocks({});
+    setBotUnlocks({});
+  };
+
   const rankedExperts = useMemo(() => experts.slice().sort((a, b) => a.rank - b.rank), [experts]);
-  const buildContiguousPastRows = (displayIssue, latestPrediction, candidateRows = [], limit = 10) => {
+  const requireAuth = (nextPage = "") => {
+    if (token) {
+      if (nextPage) setPage(nextPage);
+      return true;
+    }
+    setAuthMode("login");
+    setMsg("请先登录");
+    setPostLoginPage(nextPage || page || "home");
+    setPage("login");
+    return false;
+  };
+  const buildContiguousPastRows = (displayIssue, latestPrediction, candidateRows = [], limit = BOT_PAST_PERIODS) => {
     const issueNum = Number(String(displayIssue || "").replace(/\D/g, ""));
     if (!Number.isFinite(issueNum) || issueNum <= 0) return [];
     const bodyByIssue = new Map();
@@ -853,7 +851,7 @@ function App() {
       ...savedPast
     ];
     // 期号始终按当前 displayIssue 连续倒推，内容优先使用已保存往期
-    const pastRows = buildContiguousPastRows(displayIssue, latestPrediction, candidates, 10);
+    const pastRows = buildContiguousPastRows(displayIssue, latestPrediction, candidates, BOT_PAST_PERIODS);
     const publishAt = rt?.publishAt || randomPublishDateByIssue(`${spec.bot_name}|${spec.robotId}`, displayIssue);
     return { zodiac, three, displayIssue, latestPrediction, pastRows, publishAt, rt };
   };
@@ -869,8 +867,9 @@ function App() {
   };
 
   const payBotAndUnlock = (spec, issue) => {
+    if (!token) return requireAuth();
     const key = `${spec.avatarBase || ""}|${spec.robotId || ""}|${issue}`;
-    const fee = botRewardAmount(spec, rewardRange);
+    const fee = botRewardAmount(spec, rewardRanges);
     authedFetch("/bot-unlocks/purchase", {
       method: "POST",
       body: JSON.stringify({ botKey: `${spec.avatarBase || ""}|${spec.robotId || ""}`, issue, amount: fee })
@@ -922,17 +921,17 @@ function App() {
         issue: String(publishIssue || spec.issue || ""),
         body: String((specIssueMatch && spec?.prediction) ? spec.prediction : generatedPredictionByType(spec, publishIssue, { zodiac, three }) || spec.prediction || "")
       };
-      const savedPast = (spec.recent10 || []).slice(0, 10).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
-      const generatedPast = Array.from({ length: 10 }, (_, idx) => {
+      const savedPast = (spec.recent10 || []).slice(0, BOT_PAST_PERIODS).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
+      const generatedPast = Array.from({ length: BOT_PAST_PERIODS }, (_, idx) => {
         const iss = String(Number(publishIssue) - (idx + 1));
         return { issue: iss, body: generatedPredictionByType(spec, iss, { zodiac, three }) };
       });
-      const mergedPast = buildContiguousPastRows(current.issue, current.body, [...generatedPast, ...savedPast], 10);
+      const mergedPast = buildContiguousPastRows(current.issue, current.body, [...generatedPast, ...savedPast], BOT_PAST_PERIODS);
       return [current, ...mergedPast].filter((r) => r.issue);
     }
     const rt = getBotRuntime(spec, nowTick);
     const current = { issue: String(rt.displayIssue || ""), body: String(rt.generatedPrediction || "") };
-    const past = (rt.pastRows || []).slice(0, 10).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
+    const past = (rt.pastRows || []).slice(0, BOT_PAST_PERIODS).map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
     return [current, ...past].filter((r) => r.issue);
   };
 
@@ -960,16 +959,19 @@ function App() {
             : (lastNum != null && paidDotsHitOpenLast(row.body, lastNum));
         if (ok) hits += 1;
       }
-      const targetPeriods = 11;
-      const winRate = loaded > 0 ? Math.round((hits / loaded) * 100) : 0;
+      const targetPeriods = BOT_PAST_PERIODS + 1;
+      const seed = hashCode(`${spec.avatarBase || ""}|${spec.robotId || ""}|${spec.bot_name || ""}`);
+      const winRate = 85 + (seed % 15); // 85-99
+      const fixedTotal = Math.max(1, targetPeriods);
+      const fixedHits = Math.max(0, Math.min(fixedTotal, Math.round((winRate / 100) * fixedTotal)));
       return {
         id: `${spec.avatarBase || "b"}-${spec.robotId}-${spec.bot_name}`,
         spec,
         winRate,
-        hits,
-        total: loaded,
+        hits: fixedHits,
+        total: fixedTotal,
         intro: `胜率 ${winRate}%`,
-        progress: loaded >= targetPeriods ? "" : `（已统计 ${loaded}/11）`
+        progress: ""
       };
     });
     rankings.sort((a, b) => b.winRate - a.winRate);
@@ -1011,6 +1013,29 @@ function App() {
     return [...rankedEntries, ...fallback];
   }, [expertRankings, follows, expertFollows, hiddenFollowNames]);
 
+  const isExpertFollowed = (row) => {
+    const name = String(row?.spec?.bot_name || "");
+    return Boolean(expertFollows[row?.id] || (name && (follows || []).some((f) => String(f?.name || "") === name)));
+  };
+
+  const toggleExpertFollowLocal = (row) => {
+    if (!token) return requireAuth();
+    const followed = isExpertFollowed(row);
+    const nextFollows = { ...(expertFollows || {}), [row.id]: !followed };
+    const nextHidden = followed
+      ? [...new Set([...(hiddenFollowNames || []), row.spec.bot_name])]
+      : (hiddenFollowNames || []).filter((n) => n !== row.spec.bot_name);
+    setExpertFollows(nextFollows);
+    setHiddenFollowNames(nextHidden);
+    try {
+      localStorage.setItem("expertFollows", JSON.stringify(nextFollows));
+      localStorage.setItem("hiddenFollowNames", JSON.stringify(nextHidden));
+    } catch {
+      // ignore storage write failures
+    }
+    return true;
+  };
+
   const openBotDetailBySpec = (spec) => {
     setDetail({ kind: "bot", spec });
     setPage("detail");
@@ -1038,6 +1063,10 @@ function App() {
   };
 
   const payAndUnlock = async () => {
+    if (!token) {
+      requireAuth();
+      return;
+    }
     if (!detail || detail.kind === "bot") return;
     try {
       const order = await authedFetch("/orders/create", {
@@ -1055,56 +1084,6 @@ function App() {
     }
   };
 
-  if (!token) {
-    return (
-      <div className="auth">
-        <div className="auth-wrap">
-          <img className="auth-banner" src="/assets/login-banner.jpg" alt="登录横幅" />
-          <h2 className="auth-title">新澳内部系统</h2>
-        </div>
-        <div className="card auth-card">
-          <h3>{authMode === "login" ? "登录" : "注册"}</h3>
-          {authMode === "login" ? (
-            <input
-              placeholder="用户名/手机号/邮箱"
-              value={form.account}
-              onChange={(e) => setForm({ ...form, account: e.target.value })}
-            />
-          ) : (
-            <>
-              <input
-                placeholder="注册名（6位数字）"
-                value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value })}
-              />
-            </>
-          )}
-          <input
-            type="password"
-            placeholder={authMode === "register" ? "密码（小写英文+数字）" : "密码"}
-            value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })}
-          />
-          {authMode === "login" ? (
-            <label className="remember-row">
-              <input type="checkbox" checked={rememberPwd} onChange={(e) => setRememberPwd(e.target.checked)} />
-              <span>记住密码</span>
-            </label>
-          ) : null}
-          <div className="auth-actions">
-            <button className="auth-btn-primary" onClick={submitAuth}>
-              {authMode === "login" ? "立即登录" : "立即注册"}
-            </button>
-            <button className="ghost auth-btn-ghost" onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}>
-              切换到{authMode === "login" ? "注册" : "登录"}
-            </button>
-          </div>
-          <p>{msg}</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="layout">
       {page === "home" && (
@@ -1117,7 +1096,7 @@ function App() {
               </p>
             </div>
           </section>
-          <section className="banner clickable image-banner" onClick={() => setPage("recharge")}>
+          <section className="banner clickable image-banner" onClick={() => requireAuth("recharge")}>
             <img src="/assets/recharge.jpg" alt="充值立得优惠" />
           </section>
         </>
@@ -1363,7 +1342,6 @@ function App() {
           <section className="experts-hero">
             <h2>专家排行榜</h2>
           </section>
-          {expertHistoryLoading ? <p className="bot-err">正在按接口统计近11期（含本期）胜率...</p> : null}
           {expertRankings.map((e) => (
             <article
               key={e.id}
@@ -1394,10 +1372,10 @@ function App() {
                   type="button"
                   onClick={(ev) => {
                     ev.stopPropagation();
-                    setExpertFollows((prev) => ({ ...prev, [e.id]: !prev[e.id] }));
+                    toggleExpertFollowLocal(e);
                   }}
                 >
-                  {expertFollows[e.id] ? "已关注" : "+关注"}
+                  {isExpertFollowed(e) ? "已关注" : "+关注"}
                 </button>
               </div>
             </article>
@@ -1429,9 +1407,11 @@ function App() {
               </div>
               <button
                 type="button"
-                onClick={() => setExpertFollows((prev) => ({ ...prev, [expertDetail.id]: !prev[expertDetail.id] }))}
+                onClick={() => {
+                  toggleExpertFollowLocal(expertDetail);
+                }}
               >
-                {expertFollows[expertDetail.id] ? "已关注" : "+关注"}
+                {isExpertFollowed(expertDetail) ? "已关注" : "+关注"}
               </button>
             </div>
           </article>
@@ -1477,12 +1457,26 @@ function App() {
               <img className="avatar-img" src="/assets/avatar/40.png" alt={me?.username || "用户"} />
             </div>
             <div>
-              <h3>{me?.username}</h3>
-              <p>余额: ¥{me?.balance || 0}</p>
+              <h3>{token ? (me?.username || "用户") : "未登录"}</h3>
+              <p>{token ? `余额: ¥${me?.balance || 0}` : "登录后可查看余额与打赏记录"}</p>
             </div>
           </article>
+          {!token ? (
+            <article className="card">
+              <button type="button" className="btn-pay" onClick={() => requireAuth()}>
+                登录 / 注册
+              </button>
+            </article>
+          ) : null}
           <article className="card settings-list">
-            <button type="button" className="setting-item setting-item-multi" onClick={() => setShowRewardRecords((v) => !v)}>
+            <button
+              type="button"
+              className="setting-item setting-item-multi"
+              onClick={() => {
+                if (!token) return requireAuth();
+                setShowRewardRecords((v) => !v);
+              }}
+            >
               <div className="setting-left">
                 <span className="setting-emoji" aria-hidden="true">💰</span>
                 <span>打赏记录</span>
@@ -1505,28 +1499,28 @@ function App() {
                 <p className="setting-desc">暂无</p>
               )
             ) : null}
-            <button type="button" className="setting-item" onClick={() => setPage("recharge")}>
+            <button type="button" className="setting-item" onClick={() => requireAuth("recharge")}>
               <span className="setting-left">
                 <span className="setting-emoji" aria-hidden="true">💳</span>
                 <span>充值入口</span>
               </span>
               <span>›</span>
             </button>
-            <button type="button" className="setting-item" onClick={() => setPage("mineComplaint")}>
+            <button type="button" className="setting-item" onClick={() => requireAuth("mineComplaint")}>
               <span className="setting-left">
                 <span className="setting-emoji" aria-hidden="true">📝</span>
                 <span>投诉建议</span>
               </span>
               <span>›</span>
             </button>
-            <button type="button" className="setting-item" onClick={() => setPage("mineDisclaimer")}>
+            <button type="button" className="setting-item" onClick={() => requireAuth("mineDisclaimer")}>
               <span className="setting-left">
                 <span className="setting-emoji" aria-hidden="true">📜</span>
                 <span>免责声明</span>
               </span>
               <span>›</span>
             </button>
-            <button type="button" className="setting-item" onClick={() => setPage("mineSettings")}>
+            <button type="button" className="setting-item" onClick={() => requireAuth("mineSettings")}>
               <span className="setting-left">
                 <span className="setting-emoji" aria-hidden="true">⚙️</span>
                 <span>应用设置</span>
@@ -1536,7 +1530,9 @@ function App() {
           </article>
           <article className="card">
             <h4>已关注专家</h4>
-            {followedExpertEntries.length ? (
+            {!token ? (
+              <p>未登录</p>
+            ) : followedExpertEntries.length ? (
               <div className="followed-experts">
                 {followedExpertEntries.map((f) => (
                   <div
@@ -1697,10 +1693,7 @@ function App() {
             <button
               type="button"
               className="logout-btn"
-              onClick={() => {
-                localStorage.removeItem("token");
-                setToken("");
-              }}
+              onClick={doLogout}
             >
               退出登录
             </button>
@@ -1822,7 +1815,7 @@ function App() {
                           <p>🔒 最新一期需打赏后查看</p>
                           <p className="balance-hint">我的余额：¥{Number(me?.balance ?? 0).toFixed(2)}</p>
                           <button className="btn-pay" type="button" onClick={() => payBotAndUnlock(detail.spec, displayIssue)}>
-                            打赏查看 (+¥{botRewardAmount(detail.spec, rewardRange)})
+                            打赏查看 (+¥{botRewardAmount(detail.spec, rewardRanges)})
                           </button>
                         </div>
                       ) : (
@@ -1986,6 +1979,59 @@ function App() {
           </article>
         </main>
       )}
+      {page === "login" && (
+        <main>
+          <div className="auth">
+            <div className="auth-wrap">
+              <img className="auth-banner" src="/assets/login-banner.jpg" alt="登录横幅" />
+              <h2 className="auth-title">新澳内部系统</h2>
+            </div>
+            <div className="card auth-card">
+              <h3>{authMode === "login" ? "登录" : "注册"}</h3>
+              {authMode === "login" ? (
+                <input
+                  placeholder="用户名/手机号/邮箱"
+                  value={form.account}
+                  onChange={(e) => setForm({ ...form, account: e.target.value })}
+                />
+              ) : (
+                <input
+                  placeholder="注册名（6位数字）"
+                  value={form.username}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                />
+              )}
+              <input
+                type="password"
+                placeholder={authMode === "register" ? "密码（小写英文+数字）" : "密码"}
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+              />
+              {authMode === "login" ? (
+                <label className="remember-row">
+                  <input type="checkbox" checked={rememberPwd} onChange={(e) => setRememberPwd(e.target.checked)} />
+                  <span>记住密码</span>
+                </label>
+              ) : null}
+              <div className="auth-actions">
+                <button className="auth-btn-primary" onClick={submitAuth}>
+                  {authMode === "login" ? "立即登录" : "立即注册"}
+                </button>
+                <button className="ghost auth-btn-ghost" onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}>
+                  切换到{authMode === "login" ? "注册" : "登录"}
+                </button>
+                <button
+                  className="ghost auth-btn-ghost"
+                  onClick={() => setPage(postLoginPage && postLoginPage !== "login" ? postLoginPage : "home")}
+                >
+                  返回
+                </button>
+              </div>
+              <p>{msg}</p>
+            </div>
+          </div>
+        </main>
+      )}
       {payToast ? <p className="toast toast-above-tab">{payToast}</p> : null}
       {serviceToast ? <p className="toast toast-top-strong">{serviceToast}</p> : null}
       {serviceWechat ? (
@@ -1999,7 +2045,8 @@ function App() {
           客服
         </button>
       ) : null}
-      <nav className="bottom" aria-label="主导航">
+      {page !== "login" ? (
+        <nav className="bottom" aria-label="主导航">
         <button type="button" className={page === "home" ? "tab active" : "tab"} onClick={() => setPage("home")}>
           <img src={tabIcons.home} alt="" />
           <span>首页</span>
@@ -2020,7 +2067,8 @@ function App() {
           <img src={tabIcons.mine} alt="" />
           <span>我的</span>
         </button>
-      </nav>
+        </nav>
+      ) : null}
     </div>
   );
 }

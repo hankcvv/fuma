@@ -4,6 +4,7 @@ import "antd/dist/reset.css";
 import { getBotRuntime } from "./botParser.js";
 
 const API = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
+const BOT_PAST_PERIODS = 5;
 function nextBotIssueFromLive(liveIssue, now = new Date()) {
   const n = Number(String(liveIssue || "").replace(/\D/g, ""));
   if (!Number.isFinite(n) || n <= 0) return "";
@@ -11,6 +12,13 @@ function nextBotIssueFromLive(liveIssue, now = new Date()) {
   const m = now.getMinutes();
   const after1730 = h > 17 || (h === 17 && m >= 30);
   return String(after1730 ? n + 1 : n);
+}
+
+function fixedWinRateForBot(spec) {
+  const s = `${spec?.base || ""}|${spec?.robotId || ""}|${spec?.bot_name || ""}`;
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) h = Math.imul(h ^ s.charCodeAt(i), 16777619);
+  return 85 + ((h >>> 0) % 15); // 85-99
 }
 
 function useAdminApi(token) {
@@ -76,8 +84,11 @@ export default function AdminApp() {
   const [orderRecords, setOrderRecords] = useState([]);
   const [subAdmins, setSubAdmins] = useState([]);
   const [serviceWechat, setServiceWechat] = useState("");
-  const [rewardMin, setRewardMin] = useState("1880");
-  const [rewardMax, setRewardMax] = useState("2580");
+  const [rewardRanges, setRewardRanges] = useState({
+    "1avatar": { min: "1880", max: "2580" },
+    "2avatar": { min: "1880", max: "2580" },
+    "3avatar": { min: "1880", max: "2580" }
+  });
   const [robotExperts, setRobotExperts] = useState([]);
   const [expertType, setExpertType] = useState("all");
   const [botEditorOpen, setBotEditorOpen] = useState(false);
@@ -165,6 +176,65 @@ export default function AdminApp() {
     });
   };
   const format2 = (n) => String(Number(n)).padStart(2, "0");
+  const replaceOneNumToHit = (text, targetNum) => {
+    const raw = String(text || "");
+    const target = Number(targetNum);
+    if (!Number.isFinite(target) || target < 1 || target > 49) return raw;
+    const all = [...raw.matchAll(/\d+/g)];
+    const idxs = all
+      .map((m, i) => ({ i, n: Number(m[0]), pad: String(m[0]).length >= 2 ? 2 : 1 }))
+      .filter((x) => Number.isFinite(x.n) && x.n >= 1 && x.n <= 49);
+    if (!idxs.length) return raw;
+    if (idxs.some((x) => x.n === target)) return raw;
+    const pick = idxs[Math.floor(Math.random() * idxs.length)];
+    let k = -1;
+    return raw.replace(/\d+/g, (m) => {
+      k += 1;
+      if (k !== pick.i) return m;
+      return String(target).padStart(pick.pad, "0");
+    });
+  };
+  const ensureOneThreeGroupHit = (text, first6) => {
+    const raw = String(text || "").trim();
+    const nums = (Array.isArray(first6) ? first6 : [])
+      .map((n) => format2(n))
+      .filter(Boolean);
+    if (nums.length < 3) return raw;
+    const first6Set = new Set(nums);
+    const groups = raw
+      .split(/\s+/)
+      .map((g) => g.split("-").map((x) => format2(x)).filter(Boolean))
+      .filter((arr) => arr.length === 3);
+    const hasHit = groups.some((g) => g.every((n) => first6Set.has(n)));
+    if (hasHit) return raw;
+    const hitPool = [...new Set(nums)];
+    const shuffled = hitPool.sort(() => Math.random() - 0.5);
+    const pick3 = shuffled.slice(0, 3).map((x) => Number(x)).sort((a, b) => a - b).map((x) => format2(x));
+    const nextGroup = pick3.join("-");
+    if (!groups.length) return nextGroup;
+    const targetIdx = Math.floor(Math.random() * groups.length);
+    const groupTexts = raw.split(/\s+/);
+    if (groupTexts[targetIdx]) groupTexts[targetIdx] = nextGroup;
+    return groupTexts.join(" ");
+  };
+  const parseHistoryDraw = (payload) => {
+    const row = Array.isArray(payload?.data) ? payload.data[0] : null;
+    if (!row) return null;
+    const open = String(row.openCode || "")
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean)
+      .map((x) => Number(x));
+    const zods = String(row.zodiac || "")
+      .split(/[,\s，]+/u)
+      .map((x) => x.trim())
+      .filter(Boolean);
+    return {
+      lastNum: open.length ? open[open.length - 1] : null,
+      first6: open.slice(0, 6),
+      lastZodiac: zods.length ? zods[zods.length - 1] : ""
+    };
+  };
   const replaceOneThreeGroup = (text, a, b, c) => {
     const raw = String(text || "");
     const groupRe = /\d{1,2}\s*-\s*\d{1,2}\s*-\s*\d{1,2}/g;
@@ -306,7 +376,7 @@ export default function AdminApp() {
     return String(spec?.prediction || "");
   };
 
-  const buildContiguousPastRows = (displayIssue, latestPrediction, candidateRows = [], limit = 10) => {
+  const buildContiguousPastRows = (displayIssue, latestPrediction, candidateRows = [], limit = BOT_PAST_PERIODS) => {
     const issueNum = Number(String(displayIssue || "").replace(/\D/g, ""));
     if (!Number.isFinite(issueNum) || issueNum <= 0) return [];
     const bodyByIssue = new Map();
@@ -330,10 +400,17 @@ export default function AdminApp() {
 
   const loadRobotExperts = async () => {
     // 先保证后台编辑列表能出来，开奖接口失败时只影响胜率/红黑，不阻断整表。
-    const rows = await withAuth("/admin/bot-experts").catch(() => null);
+    let rows = await withAuth("/admin/bot-experts").catch(() => null);
     if (!Array.isArray(rows)) {
-      return robotExperts;
+      // 兜底：如果后台接口偶发失败，直接取三版面机器人，保证“专家”页有全量数据。
+      const [g1, g2, g3] = await Promise.all([
+        fetchJsonRetry(`${API}/bots/1avatar`).catch(() => []),
+        fetchJsonRetry(`${API}/bots/2avatar`).catch(() => []),
+        fetchJsonRetry(`${API}/bots/3avatar`).catch(() => [])
+      ]);
+      rows = [...(Array.isArray(g1) ? g1 : []), ...(Array.isArray(g2) ? g2 : []), ...(Array.isArray(g3) ? g3 : [])];
     }
+    if (!Array.isArray(rows) || !rows.length) return robotExperts;
     const liveRows = await fetchJsonRetry(`${API}/macau-jc`).catch(() => []);
     const liveIssue = String(liveRows?.[0]?.expect || "");
     const publishIssue = nextBotIssueFromLive(liveIssue, new Date());
@@ -359,7 +436,7 @@ export default function AdminApp() {
           : []),
         ...(Array.isArray(spec.recent10) ? spec.recent10 : [])
       ];
-      const syncedPast = buildContiguousPastRows(displayIssue, displayPred, candidates, 10);
+      const syncedPast = buildContiguousPastRows(displayIssue, displayPred, candidates, BOT_PAST_PERIODS);
       const periodRows = [{ issue: displayIssue, body: displayPred }, ...syncedPast];
       periodRows.forEach((r) => r?.issue && allIssues.add(String(r.issue)));
       return { ...spec, displayIssue, displayPred, periodRows };
@@ -403,8 +480,8 @@ export default function AdminApp() {
         if (prevIssue && row.issue === prevIssue) prevHit = hit;
         if (hit) hits += 1;
       }
-      // 历史接口波动时不阻断列表，未统计到开奖时仅回退成 0/待开奖展示。
-      const winRate = loaded > 0 ? Math.round((hits / loaded) * 100) : 0;
+      // 专家胜率统一固定在 85-99 区间展示。
+      const winRate = fixedWinRateForBot(spec);
       return {
         ...spec,
         id: `${spec.base}:${spec.file}`,
@@ -414,7 +491,7 @@ export default function AdminApp() {
         latestContent: String(spec.displayPred || "—").slice(0, 90),
         latestStamp: prevDraw ? (prevHit ? "hit" : "miss") : "pending",
         effectivePrediction: spec.displayPred || "",
-        effectiveRecent10: spec.periodRows.slice(1, 11)
+        effectiveRecent10: spec.periodRows.slice(1, BOT_PAST_PERIODS + 1)
       };
     });
     setRobotExperts(all);
@@ -437,8 +514,23 @@ export default function AdminApp() {
     if (sa.status === "fulfilled") setSubAdmins(Array.isArray(sa.value) ? sa.value : []);
     if (st.status === "fulfilled") {
       setServiceWechat(String(st.value?.serviceWechat || ""));
-      setRewardMin(String(st.value?.rewardMin ?? 1880));
-      setRewardMax(String(st.value?.rewardMax ?? 2580));
+      const ranges = st.value?.rewardRanges || {};
+      const fallbackMin = String(st.value?.rewardMin ?? 1880);
+      const fallbackMax = String(st.value?.rewardMax ?? 2580);
+      setRewardRanges({
+        "1avatar": {
+          min: String(ranges?.["1avatar"]?.min ?? fallbackMin),
+          max: String(ranges?.["1avatar"]?.max ?? fallbackMax)
+        },
+        "2avatar": {
+          min: String(ranges?.["2avatar"]?.min ?? fallbackMin),
+          max: String(ranges?.["2avatar"]?.max ?? fallbackMax)
+        },
+        "3avatar": {
+          min: String(ranges?.["3avatar"]?.min ?? fallbackMin),
+          max: String(ranges?.["3avatar"]?.max ?? fallbackMax)
+        }
+      });
     }
     try {
       const botRows = await loadRobotExperts();
@@ -464,6 +556,60 @@ export default function AdminApp() {
     setHistoryIssue((prev) => (prev && historyIssueOptions.includes(prev) ? prev : historyIssueOptions[0]));
     setHistorySelectedIds([]);
   }, [historyIssueOptions]);
+
+  const saveRewardRangeByBase = async (base) => {
+    const curr = rewardRanges?.[base] || {};
+    const min = Number(curr.min);
+    const max = Number(curr.max);
+    if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
+      message.error("请输入有效金额区间");
+      return;
+    }
+    const normalized = {
+      min: Math.min(Math.floor(min), Math.floor(max)),
+      max: Math.max(Math.floor(min), Math.floor(max))
+    };
+    const bodyRanges = {
+      "1avatar": {
+        min: Number(rewardRanges?.["1avatar"]?.min || 1880),
+        max: Number(rewardRanges?.["1avatar"]?.max || 2580)
+      },
+      "2avatar": {
+        min: Number(rewardRanges?.["2avatar"]?.min || 1880),
+        max: Number(rewardRanges?.["2avatar"]?.max || 2580)
+      },
+      "3avatar": {
+        min: Number(rewardRanges?.["3avatar"]?.min || 1880),
+        max: Number(rewardRanges?.["3avatar"]?.max || 2580)
+      }
+    };
+    bodyRanges[base] = normalized;
+    const data = await withAuth("/admin/settings", {
+      method: "PUT",
+      body: JSON.stringify({
+        serviceWechat: String(serviceWechat || "").trim(),
+        rewardMin: normalized.min,
+        rewardMax: normalized.max,
+        rewardRanges: bodyRanges
+      })
+    });
+    const nextRanges = data?.rewardRanges || bodyRanges;
+    setRewardRanges({
+      "1avatar": {
+        min: String(nextRanges?.["1avatar"]?.min ?? bodyRanges["1avatar"].min),
+        max: String(nextRanges?.["1avatar"]?.max ?? bodyRanges["1avatar"].max)
+      },
+      "2avatar": {
+        min: String(nextRanges?.["2avatar"]?.min ?? bodyRanges["2avatar"].min),
+        max: String(nextRanges?.["2avatar"]?.max ?? bodyRanges["2avatar"].max)
+      },
+      "3avatar": {
+        min: String(nextRanges?.["3avatar"]?.min ?? bodyRanges["3avatar"].min),
+        max: String(nextRanges?.["3avatar"]?.max ?? bodyRanges["3avatar"].max)
+      }
+    });
+    message.success("该版面打赏金额区间已保存");
+  };
 
   const login = async (vals) => {
     try {
@@ -527,14 +673,14 @@ export default function AdminApp() {
         <Card><Statistic title="订单数" value={overview?.orders || 0} /></Card>
         <Card><Statistic title="充值总额" value={Number(overview?.paidAmount || 0).toFixed(2)} prefix="¥" /></Card>
       </Space>
-      <Card size="small" style={{ marginBottom: 12 }}>
+      <Card size="small" style={{ marginBottom: 12 }} title="客服设置">
         <Space wrap>
           <span>客服微信号：</span>
           <Input
             value={serviceWechat}
             onChange={(e) => setServiceWechat(e.target.value)}
             placeholder="例如 wx123456"
-            style={{ width: 220 }}
+            style={{ width: 260 }}
           />
           <Button
             type="primary"
@@ -552,48 +698,34 @@ export default function AdminApp() {
           >
             保存客服微信
           </Button>
-          <span style={{ marginLeft: 10 }}>打赏随机金额区间：</span>
-          <Input
-            value={rewardMin}
-            onChange={(e) => setRewardMin(e.target.value)}
-            placeholder="最小金额"
-            style={{ width: 120 }}
-          />
-          <span>-</span>
-          <Input
-            value={rewardMax}
-            onChange={(e) => setRewardMax(e.target.value)}
-            placeholder="最大金额"
-            style={{ width: 120 }}
-          />
-          <Button
-            type="primary"
-            onClick={async () => {
-              const min = Number(rewardMin);
-              const max = Number(rewardMax);
-              if (!Number.isFinite(min) || !Number.isFinite(max) || min <= 0 || max <= 0) {
-                message.error("请输入有效金额区间");
-                return;
-              }
-              try {
-                const data = await withAuth("/admin/settings", {
-                  method: "PUT",
-                  body: JSON.stringify({
-                    serviceWechat: String(serviceWechat || "").trim(),
-                    rewardMin: Math.floor(min),
-                    rewardMax: Math.floor(max)
-                  })
-                });
-                setRewardMin(String(data?.rewardMin ?? Math.floor(min)));
-                setRewardMax(String(data?.rewardMax ?? Math.floor(max)));
-                message.success("打赏金额区间已保存（随机生效）");
-              } catch (e) {
-                message.error(e.message || "保存失败");
-              }
-            }}
-          >
-            保存打赏金额
-          </Button>
+        </Space>
+      </Card>
+
+      <Card size="small" style={{ marginBottom: 12 }} title={`打赏金额区间（最近${BOT_PAST_PERIODS}期）`}>
+        <Space direction="vertical" size={10} style={{ width: "100%" }}>
+          {[
+            ["1avatar", "精选特码"],
+            ["2avatar", "生肖特码"],
+            ["3avatar", "精选三中三"]
+          ].map(([base, label]) => (
+            <Space key={base} wrap>
+              <span style={{ width: 90 }}>{label}：</span>
+              <Input
+                value={rewardRanges[base].min}
+                onChange={(e) => setRewardRanges((prev) => ({ ...prev, [base]: { ...prev[base], min: e.target.value } }))}
+                placeholder="最小金额"
+                style={{ width: 110 }}
+              />
+              <span>-</span>
+              <Input
+                value={rewardRanges[base].max}
+                onChange={(e) => setRewardRanges((prev) => ({ ...prev, [base]: { ...prev[base], max: e.target.value } }))}
+                placeholder="最大金额"
+                style={{ width: 110 }}
+              />
+              <Button type="primary" onClick={() => saveRewardRangeByBase(base)}>保存{label}</Button>
+            </Space>
+          ))}
         </Space>
       </Card>
 
@@ -834,7 +966,8 @@ export default function AdminApp() {
           try {
             setHistorySaving(true);
             for (const row of targets) {
-              const oldRecent = Array.isArray(row.effectiveRecent10) ? row.effectiveRecent10 : (Array.isArray(row.recent10) ? row.recent10 : []);
+              // 批量修改必须基于后端真实存储 recent10，避免覆盖到前端计算出来的临时往期。
+              const oldRecent = Array.isArray(row.recent10) ? row.recent10 : [];
               const recent10 = oldRecent.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
               const idx = recent10.findIndex((r) => normalizeIssueKey(r.issue) === normalizeIssueKey(historyIssue));
               const sourceBody = idx >= 0 ? recent10[idx].body : String(row.effectivePrediction || row.prediction || "");
@@ -848,12 +981,15 @@ export default function AdminApp() {
               }
               if (idx >= 0) recent10[idx] = { ...recent10[idx], body: nextBody };
               else recent10.unshift({ issue: String(historyIssue), body: nextBody });
+              const cleanedRecent10 = recent10
+                .filter((r) => String(r.issue || "").trim())
+                .slice(0, BOT_PAST_PERIODS);
               await withAuth(`/admin/bot-experts/${row.base}/${row.file}`, {
                 method: "PUT",
                 body: JSON.stringify({
                   issue: String(row.latestIssue || row.issue || ""),
                   prediction: String(row.effectivePrediction || row.prediction || ""),
-                  recent10
+                  recent10: cleanedRecent10
                 })
               });
             }
@@ -970,7 +1106,7 @@ export default function AdminApp() {
           try {
             setSavingBot(true);
             const rawRecent = String(recent10Text || "").trim();
-            const recent10 = [];
+            let recent10 = [];
             const normalized = rawRecent.replace(/\r/g, "");
             const segRe = /第?\s*(\d{5,})\s*期?([\s\S]*?)(?=第?\s*\d{5,}\s*期?|$)/g;
             let m;
@@ -995,6 +1131,26 @@ export default function AdminApp() {
             if (!recent10.length) {
               message.error("往期记录格式不正确，请按“第xxxx期 + 付费内容”填写");
               return;
+            }
+            if (editingBot.base === "2avatar" || editingBot.base === "3avatar") {
+              recent10 = await Promise.all(
+                recent10.map(async (r) => {
+                  try {
+                    const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(r.issue)}`).catch(() => ({}));
+                    const draw = parseHistoryDraw(payload);
+                    if (!draw) return r;
+                    if (editingBot.base === "2avatar") {
+                      let body = replaceOneNumToHit(r.body, draw.lastNum);
+                      body = replaceOneZodiac(body, draw.lastZodiac);
+                      return { ...r, body };
+                    }
+                    const body = ensureOneThreeGroupHit(r.body, draw.first6);
+                    return { ...r, body };
+                  } catch {
+                    return r;
+                  }
+                })
+              );
             }
             await withAuth(`/admin/bot-experts/${editingBot.base}/${editingBot.file}`, {
               method: "PUT",

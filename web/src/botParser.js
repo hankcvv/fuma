@@ -179,13 +179,14 @@ export function getBotRuntime(spec, now = new Date()) {
   const codeCount = pickCodeCountFromTitle(spec.title);
   const seed = hashSeed(`${botKey}|stats|${slot.getTime()}`);
   const rng = mulberry32(seed);
-  const likes = 3000 + Math.floor(rng() * (8000 - 3000 + 1));
-  const views = 2000 + Math.floor(rng() * (9000 - 2000 + 1));
-  const buys = 50 + Math.floor(rng() * (800 - 50 + 1));
+  // 统一在 100-600：爱心 > 眼睛 > 购物车，且差距明显。
+  const likes = 430 + Math.floor(rng() * 171); // 430-600
+  const views = 230 + Math.floor(rng() * 171); // 230-400
+  const buys = 100 + Math.floor(rng() * 131); // 100-230
   const generatedPrediction = syntheticPredictionBody(botKey, displayIssue, codeCount);
 
   const pastRows = [];
-  for (let iss = displayIssue - 1; iss >= BOT_PAST_ISSUE_FLOOR && pastRows.length < 10; iss -= 1) {
+  for (let iss = displayIssue - 1; iss >= BOT_PAST_ISSUE_FLOOR && pastRows.length < 5; iss -= 1) {
     pastRows.push({
       issue: String(iss),
       body: syntheticPredictionBody(botKey, iss, codeCount)
