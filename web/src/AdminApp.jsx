@@ -1,5 +1,24 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Card, Checkbox, Form, Input, Modal, Select, Space, Statistic, Table, Tabs, Tag, message } from "antd";
+import {
+  Alert,
+  Button,
+  Card,
+  Checkbox,
+  Col,
+  Divider,
+  Form,
+  Input,
+  Modal,
+  Row,
+  Select,
+  Space,
+  Statistic,
+  Table,
+  Tabs,
+  Tag,
+  Typography,
+  message
+} from "antd";
 import "antd/dist/reset.css";
 import { getBotRuntime } from "./botParser.js";
 
@@ -76,8 +95,106 @@ async function fetchJsonRetry(url, attempts = 2) {
   throw lastErr || new Error("请求失败");
 }
 
+function pad2(n) {
+  return String(Number(n)).padStart(2, "0");
+}
+
+/** 与后台 / 开奖接口解析一致 */
+function parseHistoryDraw(payload) {
+  const row = Array.isArray(payload?.data) ? payload.data[0] : null;
+  if (!row) return null;
+  const open = String(row.openCode || "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => Number(x));
+  const zods = String(row.zodiac || "")
+    .split(/[,\s，]+/u)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  return {
+    lastNum: open.length ? open[open.length - 1] : null,
+    first6: open.slice(0, 6),
+    lastZodiac: zods.length ? zods[zods.length - 1] : ""
+  };
+}
+
+function combinations3From6(nums) {
+  const a = (nums || [])
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n) && n >= 1 && n <= 49)
+    .slice(0, 6);
+  if (a.length < 3) return [];
+  const out = [];
+  for (let i = 0; i < a.length; i += 1)
+    for (let j = i + 1; j < a.length; j += 1)
+      for (let k = j + 1; k < a.length; k += 1) out.push([a[i], a[j], a[k]].sort((x, y) => x - y));
+  return out;
+}
+
+/** 为每个机器人分配一组三码；前 min(n,20) 组尽量互不重复，超出部分按使用次数最少优先 */
+function assignTriplesPerRobot(first6, robotCount) {
+  const combos = combinations3From6(first6);
+  if (!combos.length || robotCount <= 0) return [];
+  const shuffled = [...combos].sort(() => Math.random() - 0.5);
+  const usage = new Map();
+  const keyOf = (t) => `${pad2(t[0])}-${pad2(t[1])}-${pad2(t[2])}`;
+  const result = [];
+  for (let i = 0; i < robotCount; i += 1) {
+    if (i < shuffled.length) {
+      const t = shuffled[i];
+      result.push([...t]);
+      usage.set(keyOf(t), (usage.get(keyOf(t)) || 0) + 1);
+    } else {
+      let best = combos[0];
+      let bestUsed = Infinity;
+      for (const c of combos) {
+        const u = usage.get(keyOf(c)) || 0;
+        if (u < bestUsed) {
+          bestUsed = u;
+          best = c;
+        }
+      }
+      const t = [...best];
+      result.push(t);
+      usage.set(keyOf(t), (usage.get(keyOf(t)) || 0) + 1);
+    }
+  }
+  return result;
+}
+
+/** 三中三付费串：每组内三码升序，组与组之间按数值序排列；支持「.」或空格分隔 */
+function sortThreeAvatarPaidBody(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return s;
+  const dot = s.includes(".");
+  const chunks = dot
+    ? s.split(".").map((x) => x.trim()).filter(Boolean)
+    : s.split(/\s+/).map((x) => x.trim()).filter(Boolean);
+  const groups = [];
+  const rest = [];
+  for (const chunk of chunks) {
+    const m = chunk.match(/^(\d{1,2})\s*-\s*(\d{1,2})\s*-\s*(\d{1,2})$/);
+    if (!m) {
+      rest.push(chunk);
+      continue;
+    }
+    const key = [Number(m[1]), Number(m[2]), Number(m[3])].sort((x, y) => x - y);
+    groups.push({ display: key.map(pad2).join("-"), key });
+  }
+  groups.sort((a, b) => {
+    for (let i = 0; i < 3; i += 1) {
+      if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i];
+    }
+    return 0;
+  });
+  const sep = dot ? "." : " ";
+  return [...groups.map((g) => g.display), ...rest].join(sep);
+}
+
 export default function AdminApp() {
   const [token, setToken] = useState(localStorage.getItem("admin_token") || "");
+  const [adminRole, setAdminRole] = useState(() => localStorage.getItem("admin_role") || "");
   const [loading, setLoading] = useState(false);
   const [overview, setOverview] = useState(null);
   const [users, setUsers] = useState([]);
@@ -109,37 +226,209 @@ export default function AdminApp() {
   const [subUser, setSubUser] = useState("");
   const [subPass, setSubPass] = useState("");
   const [subSaving, setSubSaving] = useState(false);
-  const [historyToolOpen, setHistoryToolOpen] = useState(false);
-  const [historySaving, setHistorySaving] = useState(false);
-  const [historyBase, setHistoryBase] = useState("1avatar");
-  const [historyIssue, setHistoryIssue] = useState("");
-  const [historySelectedIds, setHistorySelectedIds] = useState([]);
-  const [historyNumInput, setHistoryNumInput] = useState("");
-  const [historyZodiacInput, setHistoryZodiacInput] = useState("鼠");
-  const [historyThreeA, setHistoryThreeA] = useState("");
-  const [historyThreeB, setHistoryThreeB] = useState("");
-  const [historyThreeC, setHistoryThreeC] = useState("");
+  /** 往期批量：按版面分三块，写入库内 recent10 */
+  const [batchPast, setBatchPast] = useState({
+    "1avatar": { issue: "", num: "", selectedIds: [] },
+    "2avatar": { issue: "", num: "", zodiac: "", selectedIds: [] },
+    "3avatar": { issue: "", first6Nums: [], selectedIds: [] }
+  });
+  const [batchPastSaving, setBatchPastSaving] = useState(null);
   const [loginForm] = Form.useForm();
   const { withAuth } = useAdminApi(token);
   const filteredRobotExperts = useMemo(() => {
     if (expertType === "all") return robotExperts;
     return (robotExperts || []).filter((x) => String(x.base || "") === expertType);
   }, [robotExperts, expertType]);
-  const historyRowsByBase = useMemo(
-    () => (robotExperts || []).filter((x) => x.base === historyBase),
-    [robotExperts, historyBase]
-  );
-  const historyIssueOptions = useMemo(() => {
+  const issueOptionsForBase = (base) => {
+    const rows = (robotExperts || []).filter((x) => x.base === base);
     const set = new Set();
-    for (const r of historyRowsByBase) {
+    for (const r of rows) {
       if (r.latestIssue) set.add(String(r.latestIssue));
       for (const p of (r.effectiveRecent10 || r.recent10 || [])) {
         if (p?.issue) set.add(String(p.issue));
       }
     }
     return [...set].sort((a, b) => Number(b) - Number(a));
-  }, [historyRowsByBase]);
-  const ZODIAC_OPTIONS = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+  };
+
+  const patchBatchPast = (base, patch) => {
+    setBatchPast((p) => ({ ...p, [base]: { ...p[base], ...patch } }));
+  };
+
+  const rowsForBatchBase = (base) => (robotExperts || []).filter((x) => x.base === base);
+
+  const issue1 = batchPast["1avatar"].issue;
+  const issue2 = batchPast["2avatar"].issue;
+  const issue3 = batchPast["3avatar"].issue;
+
+  useEffect(() => {
+    const issue = String(issue1 || "").trim();
+    if (!issue) {
+      patchBatchPast("1avatar", { num: "" });
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        if (cancelled) return;
+        const draw = parseHistoryDraw(payload);
+        patchBatchPast("1avatar", { num: draw?.lastNum != null ? String(draw.lastNum) : "" });
+      } catch {
+        if (!cancelled) patchBatchPast("1avatar", { num: "" });
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [issue1]);
+
+  useEffect(() => {
+    const issue = String(issue2 || "").trim();
+    if (!issue) {
+      patchBatchPast("2avatar", { num: "", zodiac: "" });
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        if (cancelled) return;
+        const draw = parseHistoryDraw(payload);
+        patchBatchPast("2avatar", {
+          num: draw?.lastNum != null ? String(draw.lastNum) : "",
+          zodiac: draw?.lastZodiac ? String(draw.lastZodiac) : ""
+        });
+      } catch {
+        if (!cancelled) patchBatchPast("2avatar", { num: "", zodiac: "" });
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [issue2]);
+
+  useEffect(() => {
+    const issue = String(issue3 || "").trim();
+    if (!issue) {
+      patchBatchPast("3avatar", { first6Nums: [] });
+      return;
+    }
+    let cancelled = false;
+    const t = setTimeout(async () => {
+      try {
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        if (cancelled) return;
+        const draw = parseHistoryDraw(payload);
+        const f6 = Array.isArray(draw?.first6)
+          ? draw.first6.filter((n) => Number.isFinite(Number(n))).map((n) => Number(n)).slice(0, 6)
+          : [];
+        patchBatchPast("3avatar", { first6Nums: f6 });
+      } catch {
+        if (!cancelled) patchBatchPast("3avatar", { first6Nums: [] });
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [issue3]);
+
+  const applyBatchPastForBase = async (base) => {
+    const cfg = batchPast[base];
+    const issue = String(cfg.issue || "").trim();
+    if (!issue) {
+      message.error("请选择期数");
+      return;
+    }
+    const targets = rowsForBatchBase(base).filter((r) => cfg.selectedIds.includes(r.id));
+    if (!targets.length) {
+      message.error("请至少勾选一个机器人");
+      return;
+    }
+    let nextNum = Number(cfg.num);
+    if (base === "1avatar" || base === "2avatar") {
+      if (!Number.isFinite(nextNum) || nextNum < 1 || nextNum > 49) {
+        message.error("未拉取到开奖特码或号码无效，请重选期数");
+        return;
+      }
+      nextNum = Math.floor(nextNum);
+    }
+    if (base === "2avatar" && !String(cfg.zodiac || "").trim()) {
+      message.error("未拉取到开奖生肖，请重选期数或稍后重试");
+      return;
+    }
+    let triplesPlan = null;
+    if (base === "3avatar") {
+      let first6 = Array.isArray(cfg.first6Nums) ? cfg.first6Nums : [];
+      if (first6.length < 3) {
+        try {
+          const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+          const draw = parseHistoryDraw(payload);
+          first6 = Array.isArray(draw?.first6)
+            ? draw.first6.filter((n) => Number.isFinite(Number(n))).map((n) => Number(n)).slice(0, 6)
+            : [];
+        } catch {
+          first6 = [];
+        }
+      }
+      if (first6.length < 3) {
+        message.error("该期开奖前区不足 6 个号码，无法批量三中三");
+        return;
+      }
+      triplesPlan = assignTriplesPerRobot(first6, targets.length);
+    }
+    try {
+      setBatchPastSaving(base);
+      let idx3 = 0;
+      for (const row of targets) {
+        const oldRecent = Array.isArray(row.recent10) ? row.recent10 : [];
+        const recent10 = oldRecent.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
+        const idx = recent10.findIndex((r) => normalizeIssueKey(r.issue) === normalizeIssueKey(issue));
+        const sourceBody = idx >= 0 ? recent10[idx].body : String(row.effectivePrediction || row.prediction || "");
+        let nextBody = sourceBody;
+        if (base === "1avatar") {
+          nextBody = replaceOneNum(sourceBody, nextNum);
+        } else if (base === "2avatar") {
+          const zod = String(cfg.zodiac || "").trim();
+          const mode = Math.floor(Math.random() * 3);
+          if (mode === 0) {
+            nextBody = replaceOneZodiac(sourceBody, zod);
+          } else if (mode === 1) {
+            nextBody = replaceOneNum(sourceBody, nextNum);
+          } else {
+            nextBody = replaceOneNum(replaceOneZodiac(sourceBody, zod), nextNum);
+          }
+        } else {
+          const t = triplesPlan[idx3];
+          idx3 += 1;
+          nextBody = sortThreeAvatarPaidBody(replaceOneThreeGroup(sourceBody, t[0], t[1], t[2]));
+        }
+        if (idx >= 0) recent10[idx] = { ...recent10[idx], body: nextBody };
+        else recent10.unshift({ issue: String(issue), body: nextBody });
+        const cleanedRecent10 = recent10
+          .filter((r) => String(r.issue || "").trim())
+          .slice(0, BOT_PAST_PERIODS);
+        await withAuth(`/admin/bot-experts/${row.base}/${row.file}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            issue: String(row.latestIssue || row.issue || ""),
+            prediction: String(row.effectivePrediction || row.prediction || ""),
+            recent10: cleanedRecent10
+          })
+        });
+      }
+      message.success(`已更新 ${targets.length} 个「${base === "1avatar" ? "精选特码" : base === "2avatar" ? "生肖特码" : "精选三中三"}」机器人在第 ${issue} 期的往期`);
+      patchBatchPast(base, { selectedIds: [] });
+      await loadAll();
+    } catch (e) {
+      message.error(e.message || "批量修改失败");
+    } finally {
+      setBatchPastSaving(null);
+    }
+  };
   const replaceOneNum = (text, targetNum) => {
     const raw = String(text || "");
     const target = Number(targetNum);
@@ -216,24 +505,6 @@ export default function AdminApp() {
     const groupTexts = raw.split(/\s+/);
     if (groupTexts[targetIdx]) groupTexts[targetIdx] = nextGroup;
     return groupTexts.join(" ");
-  };
-  const parseHistoryDraw = (payload) => {
-    const row = Array.isArray(payload?.data) ? payload.data[0] : null;
-    if (!row) return null;
-    const open = String(row.openCode || "")
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean)
-      .map((x) => Number(x));
-    const zods = String(row.zodiac || "")
-      .split(/[,\s，]+/u)
-      .map((x) => x.trim())
-      .filter(Boolean);
-    return {
-      lastNum: open.length ? open[open.length - 1] : null,
-      first6: open.slice(0, 6),
-      lastZodiac: zods.length ? zods[zods.length - 1] : ""
-    };
   };
   const replaceOneThreeGroup = (text, a, b, c) => {
     const raw = String(text || "");
@@ -501,17 +772,40 @@ export default function AdminApp() {
   const loadAll = async () => {
     if (!token) return;
     setLoading(true);
+    const errMsg = (r, title) => (r.status === "rejected" ? r.reason?.message || "请求失败" : "");
     const [o, u, od, sa, st] = await Promise.allSettled([
-      withAuth("/admin/overview").catch(() => ({ users: 0, experts: 0, orders: 0, paidAmount: 0 })),
-      withAuth("/admin/users").catch(() => []),
-      withAuth("/admin/orders").catch(() => []),
-      withAuth("/admin/subadmins").catch(() => []),
-      withAuth("/admin/settings").catch(() => ({}))
+      withAuth("/admin/overview"),
+      withAuth("/admin/users"),
+      withAuth("/admin/orders"),
+      withAuth("/admin/subadmins"),
+      withAuth("/admin/settings")
     ]);
     if (o.status === "fulfilled") setOverview(o.value);
-    if (u.status === "fulfilled") setUsers(Array.isArray(u.value) ? u.value : []);
-    if (od.status === "fulfilled") setOrderRecords(Array.isArray(od.value) ? od.value : []);
-    if (sa.status === "fulfilled") setSubAdmins(Array.isArray(sa.value) ? sa.value : []);
+    else message.error(`数据概览：${errMsg(o)}`);
+    if (u.status === "fulfilled") {
+      const v = u.value;
+      if (Array.isArray(v)) setUsers(v);
+      else {
+        setUsers([]);
+        message.warning("用户列表返回格式异常");
+      }
+    } else message.error(`用户列表：${errMsg(u)}`);
+    if (od.status === "fulfilled") {
+      const v = od.value;
+      if (Array.isArray(v)) setOrderRecords(v);
+      else {
+        setOrderRecords([]);
+        message.warning("订单记录返回格式异常");
+      }
+    } else message.error(`购买记录：${errMsg(od)}`);
+    if (sa.status === "fulfilled") {
+      const v = sa.value;
+      if (Array.isArray(v)) setSubAdmins(v);
+      else {
+        setSubAdmins([]);
+        message.warning("子账号列表返回格式异常");
+      }
+    } else message.error(`子账号：${errMsg(sa)}`);
     if (st.status === "fulfilled") {
       setServiceWechat(String(st.value?.serviceWechat || ""));
       const ranges = st.value?.rewardRanges || {};
@@ -531,13 +825,14 @@ export default function AdminApp() {
           max: String(ranges?.["3avatar"]?.max ?? fallbackMax)
         }
       });
-    }
+    } else message.error(`系统设置：${errMsg(st)}`);
     try {
       const botRows = await loadRobotExperts();
       if (!Array.isArray(botRows)) {
         setRobotExperts((prev) => prev || []);
       }
-    } catch {
+    } catch (e) {
+      message.error(`专家机器人：${e.message || "加载失败"}`);
       setRobotExperts((prev) => prev || []);
     } finally {
       setLoading(false);
@@ -547,15 +842,6 @@ export default function AdminApp() {
   useEffect(() => {
     loadAll();
   }, [token]);
-
-  useEffect(() => {
-    if (!historyIssueOptions.length) {
-      setHistoryIssue("");
-      return;
-    }
-    setHistoryIssue((prev) => (prev && historyIssueOptions.includes(prev) ? prev : historyIssueOptions[0]));
-    setHistorySelectedIds([]);
-  }, [historyIssueOptions]);
 
   const saveRewardRangeByBase = async (base) => {
     const curr = rewardRanges?.[base] || {};
@@ -621,6 +907,9 @@ export default function AdminApp() {
       const data = await res.json();
       if (!res.ok || !data.token) throw new Error(data.message || "登录失败");
       localStorage.setItem("admin_token", data.token);
+      const role = String(data.user?.role || "user");
+      localStorage.setItem("admin_role", role);
+      setAdminRole(role);
       setToken(data.token);
       message.success("后台登录成功");
     } catch (e) {
@@ -650,6 +939,15 @@ export default function AdminApp() {
 
   return (
     <div style={{ padding: 16 }}>
+      {adminRole && !["admin", "subadmin"].includes(adminRole) ? (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="当前登录账号不是后台管理员"
+          description="用户、订单、子账号、系统设置等接口需要 admin / subadmin 角色。列表为空或报错时，请换管理员账号登录。"
+        />
+      ) : null}
       <Space style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
         <h2 style={{ margin: 0 }}>后台管理</h2>
         <Space>
@@ -660,6 +958,8 @@ export default function AdminApp() {
             danger
             onClick={() => {
               localStorage.removeItem("admin_token");
+              localStorage.removeItem("admin_role");
+              setAdminRole("");
               setToken("");
             }}
           >
@@ -804,10 +1104,10 @@ export default function AdminApp() {
                   <Button type={expertType === "1avatar" ? "primary" : "default"} onClick={() => setExpertType("1avatar")}>精选特码🔥</Button>
                   <Button type={expertType === "2avatar" ? "primary" : "default"} onClick={() => setExpertType("2avatar")}>生肖特码🐴</Button>
                   <Button type={expertType === "3avatar" ? "primary" : "default"} onClick={() => setExpertType("3avatar")}>精选三中三💯</Button>
-                  <Button onClick={() => setHistoryToolOpen(true)}>
-                    修改往期记录
-                  </Button>
                 </Space>
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  往期批量请在「往期批量」Tab 操作；此处「编辑内容」可单条精调。
+                </Typography.Text>
                 <Table
                   rowKey="id"
                   size="small"
@@ -924,171 +1224,319 @@ export default function AdminApp() {
                 ]}
               />
             )
+          },
+          {
+            key: "batchPast",
+            label: "往期批量",
+            children: (
+              <div style={{ display: "grid", gap: 12 }}>
+                <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+                  选择期数后约 0.4s 自动拉取该期开奖；精选/生肖展示特码与生肖，三中三展示前区 6 个开奖号。勾选机器人后点「应用批量修改」写入库内 recent10。
+                </Typography.Paragraph>
+                <Row gutter={[16, 16]}>
+                  <Col xs={24} lg={8}>
+                    <Card
+                      size="small"
+                      bordered
+                      title="精选特码"
+                      headStyle={{ background: "linear-gradient(135deg, #fff7e6 0%, #fff 100%)" }}
+                    >
+                      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                        <Space wrap style={{ width: "100%" }}>
+                          <span style={{ width: 40 }}>期数</span>
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder="选择期数"
+                            style={{ flex: 1, minWidth: 120 }}
+                            value={batchPast["1avatar"].issue || undefined}
+                            onChange={(v) => patchBatchPast("1avatar", { issue: v || "" })}
+                            options={issueOptionsForBase("1avatar").map((x) => ({ value: x, label: x }))}
+                          />
+                        </Space>
+                        <div style={{ padding: "8px 10px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                          <Typography.Text type="secondary">开奖特码（末位）：</Typography.Text>{" "}
+                          <Typography.Text strong code>
+                            {batchPast["1avatar"].num || "—"}
+                          </Typography.Text>
+                        </div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          切换期数后自动填入；应用时随机替换该期付费文案中一个号码为该特码。
+                        </Typography.Text>
+                        <Divider style={{ margin: "8px 0" }} />
+                        <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                          <Checkbox
+                            checked={
+                              rowsForBatchBase("1avatar").length > 0 &&
+                              batchPast["1avatar"].selectedIds.length === rowsForBatchBase("1avatar").length
+                            }
+                            indeterminate={
+                              batchPast["1avatar"].selectedIds.length > 0 &&
+                              batchPast["1avatar"].selectedIds.length < rowsForBatchBase("1avatar").length
+                            }
+                            onChange={(e) =>
+                              patchBatchPast("1avatar", {
+                                selectedIds: e.target.checked ? rowsForBatchBase("1avatar").map((r) => r.id) : []
+                              })
+                            }
+                          >
+                            全选本版面
+                          </Checkbox>
+                          <Typography.Text type="secondary">{rowsForBatchBase("1avatar").length} 个机器人</Typography.Text>
+                        </Space>
+                        <div
+                          style={{
+                            maxHeight: 280,
+                            overflow: "auto",
+                            background: "#fafafa",
+                            padding: 8,
+                            borderRadius: 8,
+                            border: "1px solid #f0f0f0"
+                          }}
+                        >
+                          <Checkbox.Group
+                            style={{ width: "100%" }}
+                            value={batchPast["1avatar"].selectedIds}
+                            onChange={(vals) => patchBatchPast("1avatar", { selectedIds: vals })}
+                          >
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {rowsForBatchBase("1avatar").map((r) => (
+                                <label
+                                  key={r.id}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    background: "#fff",
+                                    padding: "6px 8px",
+                                    borderRadius: 6
+                                  }}
+                                >
+                                  <Checkbox value={r.id}>{r.name}</Checkbox>
+                                  <span style={{ color: "#999", fontSize: 12 }}>{r.winRate}%</span>
+                                </label>
+                              ))}
+                            </div>
+                          </Checkbox.Group>
+                        </div>
+                        <Button
+                          type="primary"
+                          block
+                          loading={batchPastSaving === "1avatar"}
+                          onClick={() => applyBatchPastForBase("1avatar")}
+                        >
+                          应用批量修改
+                        </Button>
+                      </Space>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card
+                      size="small"
+                      bordered
+                      title="生肖特码"
+                      headStyle={{ background: "linear-gradient(135deg, #f6ffed 0%, #fff 100%)" }}
+                    >
+                      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                        <Space wrap style={{ width: "100%" }}>
+                          <span style={{ width: 40 }}>期数</span>
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder="选择期数"
+                            style={{ flex: 1, minWidth: 120 }}
+                            value={batchPast["2avatar"].issue || undefined}
+                            onChange={(v) => patchBatchPast("2avatar", { issue: v || "" })}
+                            options={issueOptionsForBase("2avatar").map((x) => ({ value: x, label: x }))}
+                          />
+                        </Space>
+                        <div style={{ padding: "8px 10px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                          <div>
+                            <Typography.Text type="secondary">开奖生肖（末位）：</Typography.Text>{" "}
+                            <Typography.Text strong>{batchPast["2avatar"].zodiac || "—"}</Typography.Text>
+                          </div>
+                          <div style={{ marginTop: 6 }}>
+                            <Typography.Text type="secondary">开奖特码（末位）：</Typography.Text>{" "}
+                            <Typography.Text strong code>
+                              {batchPast["2avatar"].num || "—"}
+                            </Typography.Text>
+                          </div>
+                        </div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          切换期数后自动填入；点击应用时每个机器人随机三选一：只改生肖命中、只改特码命中、或生肖与特码都改。
+                        </Typography.Text>
+                        <Divider style={{ margin: "8px 0" }} />
+                        <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                          <Checkbox
+                            checked={
+                              rowsForBatchBase("2avatar").length > 0 &&
+                              batchPast["2avatar"].selectedIds.length === rowsForBatchBase("2avatar").length
+                            }
+                            indeterminate={
+                              batchPast["2avatar"].selectedIds.length > 0 &&
+                              batchPast["2avatar"].selectedIds.length < rowsForBatchBase("2avatar").length
+                            }
+                            onChange={(e) =>
+                              patchBatchPast("2avatar", {
+                                selectedIds: e.target.checked ? rowsForBatchBase("2avatar").map((r) => r.id) : []
+                              })
+                            }
+                          >
+                            全选本版面
+                          </Checkbox>
+                          <Typography.Text type="secondary">{rowsForBatchBase("2avatar").length} 个机器人</Typography.Text>
+                        </Space>
+                        <div
+                          style={{
+                            maxHeight: 280,
+                            overflow: "auto",
+                            background: "#fafafa",
+                            padding: 8,
+                            borderRadius: 8,
+                            border: "1px solid #f0f0f0"
+                          }}
+                        >
+                          <Checkbox.Group
+                            style={{ width: "100%" }}
+                            value={batchPast["2avatar"].selectedIds}
+                            onChange={(vals) => patchBatchPast("2avatar", { selectedIds: vals })}
+                          >
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {rowsForBatchBase("2avatar").map((r) => (
+                                <label
+                                  key={r.id}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    background: "#fff",
+                                    padding: "6px 8px",
+                                    borderRadius: 6
+                                  }}
+                                >
+                                  <Checkbox value={r.id}>{r.name}</Checkbox>
+                                  <span style={{ color: "#999", fontSize: 12 }}>{r.winRate}%</span>
+                                </label>
+                              ))}
+                            </div>
+                          </Checkbox.Group>
+                        </div>
+                        <Button
+                          type="primary"
+                          block
+                          loading={batchPastSaving === "2avatar"}
+                          onClick={() => applyBatchPastForBase("2avatar")}
+                        >
+                          应用批量修改
+                        </Button>
+                      </Space>
+                    </Card>
+                  </Col>
+                  <Col xs={24} lg={8}>
+                    <Card
+                      size="small"
+                      bordered
+                      title="精选三中三"
+                      headStyle={{ background: "linear-gradient(135deg, #e6f7ff 0%, #fff 100%)" }}
+                    >
+                      <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                        <Space wrap style={{ width: "100%" }}>
+                          <span style={{ width: 40 }}>期数</span>
+                          <Select
+                            showSearch
+                            allowClear
+                            placeholder="选择期数"
+                            style={{ flex: 1, minWidth: 120 }}
+                            value={batchPast["3avatar"].issue || undefined}
+                            onChange={(v) => patchBatchPast("3avatar", { issue: v || "" })}
+                            options={issueOptionsForBase("3avatar").map((x) => ({ value: x, label: x }))}
+                          />
+                        </Space>
+                        <div style={{ padding: "8px 10px", background: "#fafafa", borderRadius: 8, border: "1px solid #f0f0f0" }}>
+                          <Typography.Text type="secondary">开奖前区 6 个号：</Typography.Text>{" "}
+                          <Typography.Text strong code style={{ wordBreak: "break-all" }}>
+                            {batchPast["3avatar"].first6Nums?.length
+                              ? batchPast["3avatar"].first6Nums.map((n) => pad2(n)).join("、")
+                              : "—"}
+                          </Typography.Text>
+                        </div>
+                        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                          应用时为每个勾选的机器人从上述 6 码中各分配一组三码（前 {combinations3From6(batchPast["3avatar"].first6Nums || []).length || 0}{" "}
+                          个尽量不重复），再随机替换其中一整组；保存后自动按号码从小到大整理每组及组顺序。
+                        </Typography.Text>
+                        <Divider style={{ margin: "8px 0" }} />
+                        <Space style={{ width: "100%", justifyContent: "space-between" }}>
+                          <Checkbox
+                            checked={
+                              rowsForBatchBase("3avatar").length > 0 &&
+                              batchPast["3avatar"].selectedIds.length === rowsForBatchBase("3avatar").length
+                            }
+                            indeterminate={
+                              batchPast["3avatar"].selectedIds.length > 0 &&
+                              batchPast["3avatar"].selectedIds.length < rowsForBatchBase("3avatar").length
+                            }
+                            onChange={(e) =>
+                              patchBatchPast("3avatar", {
+                                selectedIds: e.target.checked ? rowsForBatchBase("3avatar").map((r) => r.id) : []
+                              })
+                            }
+                          >
+                            全选本版面
+                          </Checkbox>
+                          <Typography.Text type="secondary">{rowsForBatchBase("3avatar").length} 个机器人</Typography.Text>
+                        </Space>
+                        <div
+                          style={{
+                            maxHeight: 280,
+                            overflow: "auto",
+                            background: "#fafafa",
+                            padding: 8,
+                            borderRadius: 8,
+                            border: "1px solid #f0f0f0"
+                          }}
+                        >
+                          <Checkbox.Group
+                            style={{ width: "100%" }}
+                            value={batchPast["3avatar"].selectedIds}
+                            onChange={(vals) => patchBatchPast("3avatar", { selectedIds: vals })}
+                          >
+                            <div style={{ display: "grid", gap: 6 }}>
+                              {rowsForBatchBase("3avatar").map((r) => (
+                                <label
+                                  key={r.id}
+                                  style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    background: "#fff",
+                                    padding: "6px 8px",
+                                    borderRadius: 6
+                                  }}
+                                >
+                                  <Checkbox value={r.id}>{r.name}</Checkbox>
+                                  <span style={{ color: "#999", fontSize: 12 }}>{r.winRate}%</span>
+                                </label>
+                              ))}
+                            </div>
+                          </Checkbox.Group>
+                        </div>
+                        <Button
+                          type="primary"
+                          block
+                          loading={batchPastSaving === "3avatar"}
+                          onClick={() => applyBatchPastForBase("3avatar")}
+                        >
+                          应用批量修改
+                        </Button>
+                      </Space>
+                    </Card>
+                  </Col>
+                </Row>
+              </div>
+            )
           }
         ]}
       />
-
-      <Modal
-        width={860}
-        open={historyToolOpen}
-        title="修改往期记录"
-        okText="确认修改"
-        cancelText="取消"
-        confirmLoading={historySaving}
-        onCancel={() => setHistoryToolOpen(false)}
-        onOk={async () => {
-          if (!historyIssue) {
-            message.error("请先选择期数");
-            return;
-          }
-          const targets = historyRowsByBase.filter((r) => historySelectedIds.includes(r.id));
-          if (!targets.length) {
-            message.error("请至少勾选一个机器人");
-            return;
-          }
-          let nextNum = Number(historyNumInput);
-          if (historyBase === "1avatar" || historyBase === "2avatar") {
-            if (!Number.isFinite(nextNum) || nextNum < 1 || nextNum > 49) {
-              message.error("请输入 1-49 的数字");
-              return;
-            }
-            nextNum = Math.floor(nextNum);
-          }
-          if (historyBase === "3avatar") {
-            const a = Number(historyThreeA);
-            const b = Number(historyThreeB);
-            const c = Number(historyThreeC);
-            if (![a, b, c].every((x) => Number.isFinite(x) && x >= 1 && x <= 49)) {
-              message.error("三中三请填写 3 个 1-49 的数字");
-              return;
-            }
-          }
-          try {
-            setHistorySaving(true);
-            for (const row of targets) {
-              // 批量修改必须基于后端真实存储 recent10，避免覆盖到前端计算出来的临时往期。
-              const oldRecent = Array.isArray(row.recent10) ? row.recent10 : [];
-              const recent10 = oldRecent.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") }));
-              const idx = recent10.findIndex((r) => normalizeIssueKey(r.issue) === normalizeIssueKey(historyIssue));
-              const sourceBody = idx >= 0 ? recent10[idx].body : String(row.effectivePrediction || row.prediction || "");
-              let nextBody = sourceBody;
-              if (historyBase === "1avatar") {
-                nextBody = replaceOneNum(sourceBody, nextNum);
-              } else if (historyBase === "2avatar") {
-                nextBody = replaceOneNum(replaceOneZodiac(sourceBody, historyZodiacInput), nextNum);
-              } else {
-                nextBody = replaceOneThreeGroup(sourceBody, historyThreeA, historyThreeB, historyThreeC);
-              }
-              if (idx >= 0) recent10[idx] = { ...recent10[idx], body: nextBody };
-              else recent10.unshift({ issue: String(historyIssue), body: nextBody });
-              const cleanedRecent10 = recent10
-                .filter((r) => String(r.issue || "").trim())
-                .slice(0, BOT_PAST_PERIODS);
-              await withAuth(`/admin/bot-experts/${row.base}/${row.file}`, {
-                method: "PUT",
-                body: JSON.stringify({
-                  issue: String(row.latestIssue || row.issue || ""),
-                  prediction: String(row.effectivePrediction || row.prediction || ""),
-                  recent10: cleanedRecent10
-                })
-              });
-            }
-            message.success(`已更新 ${targets.length} 个机器人在第${historyIssue}期的往期内容`);
-            setHistoryToolOpen(false);
-            await loadAll();
-          } catch (e) {
-            message.error(e.message || "批量修改失败");
-          } finally {
-            setHistorySaving(false);
-          }
-        }}
-      >
-        <div style={{ display: "grid", gap: 10 }}>
-          <Space wrap>
-            <span>版面：</span>
-            <Select
-              style={{ width: 220 }}
-              value={historyBase}
-              onChange={setHistoryBase}
-              options={[
-                { value: "1avatar", label: "精选特码机器人" },
-                { value: "2avatar", label: "生肖特码机器人" },
-                { value: "3avatar", label: "精选三中三机器人" }
-              ]}
-            />
-            <span>期数：</span>
-            <Select
-              style={{ width: 160 }}
-              value={historyIssue || undefined}
-              onChange={setHistoryIssue}
-              options={historyIssueOptions.map((x) => ({ value: x, label: x }))}
-              placeholder="选择期数"
-            />
-          </Space>
-          {historyBase === "2avatar" ? (
-            <Space wrap>
-              <span>生肖：</span>
-              <Select
-                style={{ width: 120 }}
-                value={historyZodiacInput}
-                onChange={setHistoryZodiacInput}
-                options={ZODIAC_OPTIONS.map((z) => ({ value: z, label: z }))}
-              />
-              <span>数字：</span>
-              <Input style={{ width: 140 }} value={historyNumInput} onChange={(e) => setHistoryNumInput(e.target.value)} placeholder="1-49" />
-            </Space>
-          ) : historyBase === "3avatar" ? (
-            <Space wrap>
-              <span>替换组：</span>
-              <Input style={{ width: 90 }} value={historyThreeA} onChange={(e) => setHistoryThreeA(e.target.value)} placeholder="01" />
-              <span>-</span>
-              <Input style={{ width: 90 }} value={historyThreeB} onChange={(e) => setHistoryThreeB(e.target.value)} placeholder="08" />
-              <span>-</span>
-              <Input style={{ width: 90 }} value={historyThreeC} onChange={(e) => setHistoryThreeC(e.target.value)} placeholder="15" />
-              <span style={{ color: "#999" }}>会随机替换一整组</span>
-            </Space>
-          ) : (
-            <Space wrap>
-              <span>数字：</span>
-              <Input style={{ width: 140 }} value={historyNumInput} onChange={(e) => setHistoryNumInput(e.target.value)} placeholder="1-49" />
-            </Space>
-          )}
-          <div style={{ maxHeight: 280, overflow: "auto", background: "#fafafa", padding: 10, borderRadius: 8, border: "1px solid #eee" }}>
-            <div style={{ marginBottom: 8, color: "#666" }}>
-              勾选机器人（右侧显示命中率）
-            </div>
-            <div style={{ marginBottom: 8 }}>
-              <Checkbox
-                checked={historyRowsByBase.length > 0 && historySelectedIds.length === historyRowsByBase.length}
-                indeterminate={historySelectedIds.length > 0 && historySelectedIds.length < historyRowsByBase.length}
-                onChange={(e) => {
-                  if (e.target.checked) {
-                    setHistorySelectedIds(historyRowsByBase.map((r) => r.id));
-                  } else {
-                    setHistorySelectedIds([]);
-                  }
-                }}
-              >
-                全选
-              </Checkbox>
-            </div>
-            <Checkbox.Group
-              style={{ width: "100%" }}
-              value={historySelectedIds}
-              onChange={(vals) => setHistorySelectedIds(vals)}
-            >
-              <div style={{ display: "grid", gap: 8 }}>
-                {historyRowsByBase.map((r) => (
-                  <label key={r.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fff", padding: "6px 8px", borderRadius: 6 }}>
-                    <Checkbox value={r.id}>{r.name}</Checkbox>
-                    <span style={{ color: "#888" }}>命中率 {Number(r.winRate || 0)}%</span>
-                  </label>
-                ))}
-              </div>
-            </Checkbox.Group>
-          </div>
-        </div>
-      </Modal>
 
       <Modal
         width={820}
