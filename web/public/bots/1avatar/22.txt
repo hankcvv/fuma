@@ -1,10 +1,12 @@
 bot_name: 爆庄师
 robotId: 3.jpg
-issue: 2026123
+issue: 2026122
 title: 第*****期 新澳🔥🀄💰【爆庄师】🚲🚗内幕猛料【1码🀄特】,抓住时机为自己创造财，长期跟踪稳赚
 prediction: 06
 
 recent10:
+issue: 2026117
+16
 issue: 2026122
 01
 issue: 2026121
@@ -13,5 +15,3 @@ issue: 2026120
 06 47
 issue: 2026119
 09 11
-issue: 2026118
-08 31

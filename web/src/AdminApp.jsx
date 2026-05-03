@@ -1,26 +1,52 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
+  App,
+  Avatar,
+  Badge,
   Button,
   Card,
   Checkbox,
   Col,
+  ConfigProvider,
   Divider,
+  Dropdown,
+  Flex,
   Form,
   Input,
+  Layout,
+  Menu,
   Modal,
+  Progress,
   Row,
   Select,
   Space,
-  Statistic,
   Table,
   Tabs,
   Tag,
+  Tooltip,
   Typography,
-  message
+  message,
+  theme as antdTheme
 } from "antd";
+import {
+  BellOutlined,
+  BgColorsOutlined,
+  DashboardOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
+  RobotOutlined,
+  SafetyCertificateOutlined,
+  SearchOutlined,
+  ShoppingOutlined,
+  UserOutlined,
+  ThunderboltOutlined
+} from "@ant-design/icons";
 import "antd/dist/reset.css";
+import "./admin-shell.css";
 import { getBotRuntime } from "./botParser.js";
+
+const { Header, Sider, Content } = Layout;
 
 const API = (import.meta.env.VITE_API_URL || "/api").replace(/\/$/, "");
 const BOT_PAST_PERIODS = 5;
@@ -99,16 +125,31 @@ function pad2(n) {
   return String(Number(n)).padStart(2, "0");
 }
 
-/** 与后台 / 开奖接口解析一致 */
+/** 历史接口期号：至少 6 位数字；不足 7 位时按当前年 + 后三位期内序号补足，避免短期号拉不到生肖 */
+function normalizeExpectForMacauHistory(issue) {
+  const d = String(issue ?? "").replace(/\D/g, "");
+  if (!d) return "";
+  if (d.length >= 7) return d;
+  if (d.length >= 6) return d;
+  const y = new Date().getFullYear();
+  if (d.length <= 3) return `${y}${d.padStart(3, "0")}`;
+  const tail = d.slice(-3).padStart(3, "0");
+  return `${y}${tail}`;
+}
+
+/** 与后台 / 开奖接口解析一致；兼容 data 形态与字段别名 */
 function parseHistoryDraw(payload) {
-  const row = Array.isArray(payload?.data) ? payload.data[0] : null;
+  const raw = payload?.data;
+  const row = Array.isArray(raw) ? raw[0] || null : raw && typeof raw === "object" ? raw : null;
   if (!row) return null;
-  const open = String(row.openCode || "")
+  const openRaw = row.openCode ?? row.open_code ?? "";
+  const open = String(openRaw || "")
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean)
     .map((x) => Number(x));
-  const zods = String(row.zodiac || "")
+  const zodiacRaw = Array.isArray(row.zodiac) ? row.zodiac.join(",") : String(row.zodiac ?? row.openZodiac ?? "");
+  const zods = zodiacRaw
     .split(/[,\s，]+/u)
     .map((x) => x.trim())
     .filter(Boolean);
@@ -233,8 +274,15 @@ export default function AdminApp() {
     "3avatar": { issue: "", first6Nums: [], selectedIds: [] }
   });
   const [batchPastSaving, setBatchPastSaving] = useState(null);
+  const [adminMenuKey, setAdminMenuKey] = useState("overview");
+  const [siderCollapsed, setSiderCollapsed] = useState(true);
+  const [isDark, setIsDark] = useState(() => localStorage.getItem("admin_theme") === "dark");
   const [loginForm] = Form.useForm();
   const { withAuth } = useAdminApi(token);
+
+  useEffect(() => {
+    localStorage.setItem("admin_theme", isDark ? "dark" : "light");
+  }, [isDark]);
   const filteredRobotExperts = useMemo(() => {
     if (expertType === "all") return robotExperts;
     return (robotExperts || []).filter((x) => String(x.base || "") === expertType);
@@ -270,7 +318,9 @@ export default function AdminApp() {
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        const exp = normalizeExpectForMacauHistory(issue);
+        if (!exp) return;
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(exp)}`);
         if (cancelled) return;
         const draw = parseHistoryDraw(payload);
         patchBatchPast("1avatar", { num: draw?.lastNum != null ? String(draw.lastNum) : "" });
@@ -293,7 +343,9 @@ export default function AdminApp() {
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        const exp = normalizeExpectForMacauHistory(issue);
+        if (!exp) return;
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(exp)}`);
         if (cancelled) return;
         const draw = parseHistoryDraw(payload);
         patchBatchPast("2avatar", {
@@ -319,7 +371,9 @@ export default function AdminApp() {
     let cancelled = false;
     const t = setTimeout(async () => {
       try {
-        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+        const exp = normalizeExpectForMacauHistory(issue);
+        if (!exp) return;
+        const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(exp)}`);
         if (cancelled) return;
         const draw = parseHistoryDraw(payload);
         const f6 = Array.isArray(draw?.first6)
@@ -365,7 +419,8 @@ export default function AdminApp() {
       let first6 = Array.isArray(cfg.first6Nums) ? cfg.first6Nums : [];
       if (first6.length < 3) {
         try {
-          const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(issue)}`);
+          const exp = normalizeExpectForMacauHistory(issue);
+          const payload = exp ? await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(exp)}`).catch(() => ({})) : {};
           const draw = parseHistoryDraw(payload);
           first6 = Array.isArray(draw?.first6)
             ? draw.first6.filter((n) => Number.isFinite(Number(n))).map((n) => Number(n)).slice(0, 6)
@@ -411,11 +466,17 @@ export default function AdminApp() {
         const cleanedRecent10 = recent10
           .filter((r) => String(r.issue || "").trim())
           .slice(0, BOT_PAST_PERIODS);
+        const latestIss = String(row.latestIssue || row.issue || "").trim();
+        let nextPrediction = String(row.effectivePrediction || row.prediction || "");
+        // 批量修改的期号若即当前「最新发布期」，前台付费气泡读 prediction / 需与 recent10 一致
+        if (latestIss && normalizeIssueKey(issue) === normalizeIssueKey(latestIss)) {
+          nextPrediction = String(nextBody);
+        }
         await withAuth(`/admin/bot-experts/${row.base}/${row.file}`, {
           method: "PUT",
           body: JSON.stringify({
-            issue: String(row.latestIssue || row.issue || ""),
-            prediction: String(row.effectivePrediction || row.prediction || ""),
+            issue: latestIss,
+            prediction: nextPrediction,
             recent10: cleanedRecent10
           })
         });
@@ -919,126 +980,361 @@ export default function AdminApp() {
 
   if (!token) {
     return (
-      <div style={{ maxWidth: 420, margin: "60px auto", padding: 16 }}>
-        <Card title="后台管理登录">
-          <Form form={loginForm} layout="vertical" onFinish={login}>
-            <Form.Item label="账号" name="account" rules={[{ required: true }]}>
-              <Input placeholder="例如 qa_demo / admin" />
-            </Form.Item>
-            <Form.Item label="密码" name="password" rules={[{ required: true }]}>
-              <Input.Password placeholder="输入密码" />
-            </Form.Item>
-            <Button type="primary" htmlType="submit" block>
-              登录后台
-            </Button>
-          </Form>
-        </Card>
-      </div>
+      <ConfigProvider
+        theme={{
+          algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+          token: { borderRadiusLG: 12, colorPrimary: "#6366f1" }
+        }}
+      >
+        <div className="admin-login-wrap">
+          <Card className="admin-login-card" title="后台管理登录" variant="borderless">
+            <Form form={loginForm} layout="vertical" onFinish={login}>
+              <Form.Item label="账号" name="account" rules={[{ required: true }]}>
+                <Input placeholder="例如 qa_demo / admin" />
+              </Form.Item>
+              <Form.Item label="密码" name="password" rules={[{ required: true }]}>
+                <Input.Password placeholder="输入密码" />
+              </Form.Item>
+              <Flex justify="flex-end" style={{ marginBottom: 8 }}>
+                <Button type="text" size="small" icon={<BgColorsOutlined />} onClick={() => setIsDark((d) => !d)}>
+                  {isDark ? "浅色" : "深色"}
+                </Button>
+              </Flex>
+              <Button type="primary" htmlType="submit" block size="large" style={{ borderRadius: 10 }}>
+                登录后台
+              </Button>
+            </Form>
+          </Card>
+        </div>
+      </ConfigProvider>
     );
   }
 
+  const adminNavTitle = {
+    overview: "工作台",
+    users: "用户管理",
+    experts: "专家机器人",
+    orders: "购买记录",
+    subs: "子账号",
+    batchPast: "往期批量"
+  };
+  const overviewScaleMax = Math.max(
+    Number(overview?.users || 0),
+    Number(overview?.experts || 0),
+    Number(overview?.orders || 0),
+    1
+  );
+  const siderPx = siderCollapsed ? 72 : 200;
+
   return (
-    <div style={{ padding: 16 }}>
-      {adminRole && !["admin", "subadmin"].includes(adminRole) ? (
-        <Alert
-          type="warning"
-          showIcon
-          style={{ marginBottom: 12 }}
-          message="当前登录账号不是后台管理员"
-          description="用户、订单、子账号、系统设置等接口需要 admin / subadmin 角色。列表为空或报错时，请换管理员账号登录。"
-        />
-      ) : null}
-      <Space style={{ marginBottom: 12, width: "100%", justifyContent: "space-between" }}>
-        <h2 style={{ margin: 0 }}>后台管理</h2>
-        <Space>
-          <Button onClick={loadAll} loading={loading}>刷新</Button>
-          <Button onClick={() => setSubOpen(true)}>添加子账号</Button>
-          <Button onClick={() => setPwdOpen(true)}>修改密码</Button>
-          <Button
-            danger
-            onClick={() => {
-              localStorage.removeItem("admin_token");
-              localStorage.removeItem("admin_role");
-              setAdminRole("");
-              setToken("");
-            }}
+    <ConfigProvider
+      theme={{
+        algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
+        token: {
+          borderRadiusLG: 12,
+          colorPrimary: "#6366f1",
+          fontFamily: "'Inter', 'SF Pro Display', system-ui, -apple-system, 'Segoe UI', sans-serif"
+        }
+      }}
+    >
+      <App>
+        <Layout
+          className={`admin-app-root${isDark ? " admin-app-root--dark" : ""}`}
+          style={{ background: isDark ? undefined : "#f4f6fb" }}
+        >
+          <Sider
+            width={200}
+            collapsedWidth={72}
+            collapsed={siderCollapsed}
+            onCollapse={setSiderCollapsed}
+            theme="dark"
+            className="admin-sider"
+            trigger={null}
+            style={{ display: "flex", flexDirection: "column" }}
           >
-            退出
-          </Button>
-        </Space>
-      </Space>
-
-      <Space size={12} wrap style={{ marginBottom: 12 }}>
-        <Card><Statistic title="用户数" value={overview?.users || 0} /></Card>
-        <Card><Statistic title="订单数" value={overview?.orders || 0} /></Card>
-        <Card><Statistic title="充值总额" value={Number(overview?.paidAmount || 0).toFixed(2)} prefix="¥" /></Card>
-      </Space>
-      <Card size="small" style={{ marginBottom: 12 }} title="客服设置">
-        <Space wrap>
-          <span>客服微信号：</span>
-          <Input
-            value={serviceWechat}
-            onChange={(e) => setServiceWechat(e.target.value)}
-            placeholder="例如 wx123456"
-            style={{ width: 260 }}
-          />
-          <Button
-            type="primary"
-            onClick={async () => {
-              try {
-                await withAuth("/admin/settings", {
-                  method: "PUT",
-                  body: JSON.stringify({ serviceWechat: String(serviceWechat || "").trim() })
-                });
-                message.success("客服微信已保存");
-              } catch (e) {
-                message.error(e.message || "保存失败");
-              }
-            }}
-          >
-            保存客服微信
-          </Button>
-        </Space>
-      </Card>
-
-      <Card size="small" style={{ marginBottom: 12 }} title={`打赏金额区间（最近${BOT_PAST_PERIODS}期）`}>
-        <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          {[
-            ["1avatar", "精选特码"],
-            ["2avatar", "生肖特码"],
-            ["3avatar", "精选三中三"]
-          ].map(([base, label]) => (
-            <Space key={base} wrap>
-              <span style={{ width: 90 }}>{label}：</span>
-              <Input
-                value={rewardRanges[base].min}
-                onChange={(e) => setRewardRanges((prev) => ({ ...prev, [base]: { ...prev[base], min: e.target.value } }))}
-                placeholder="最小金额"
-                style={{ width: 110 }}
+            <div className="admin-sider-logo">
+              <span className="admin-sider-logo-mark">F</span>
+              {!siderCollapsed ? <span>Fuma</span> : null}
+            </div>
+            <div style={{ flex: 1, overflow: "auto" }}>
+              <Menu
+                theme="dark"
+                mode="inline"
+                inlineCollapsed={siderCollapsed}
+                selectedKeys={[adminMenuKey]}
+                onClick={({ key }) => setAdminMenuKey(key)}
+                items={[
+                  { key: "overview", icon: <DashboardOutlined />, label: "工作台" },
+                  { key: "users", icon: <UserOutlined />, label: "用户" },
+                  { key: "experts", icon: <RobotOutlined />, label: "专家" },
+                  { key: "orders", icon: <ShoppingOutlined />, label: "购买记录" },
+                  { key: "subs", icon: <SafetyCertificateOutlined />, label: "子账号" },
+                  { key: "batchPast", icon: <ThunderboltOutlined />, label: "往期批量" }
+                ]}
               />
-              <span>-</span>
-              <Input
-                value={rewardRanges[base].max}
-                onChange={(e) => setRewardRanges((prev) => ({ ...prev, [base]: { ...prev[base], max: e.target.value } }))}
-                placeholder="最大金额"
-                style={{ width: 110 }}
-              />
-              <Button type="primary" onClick={() => saveRewardRangeByBase(base)}>保存{label}</Button>
-            </Space>
-          ))}
-        </Space>
-      </Card>
-
-      <Tabs
-        items={[
+            </div>
+            <div style={{ padding: 8, borderTop: "1px solid rgba(255,255,255,0.06)" }}>
+              <Tooltip title={siderCollapsed ? "展开侧栏" : "收起侧栏"} placement="right">
+                <Button
+                  type="text"
+                  block
+                  icon={siderCollapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
+                  onClick={() => setSiderCollapsed((c) => !c)}
+                  style={{ color: "rgba(255,255,255,0.7)" }}
+                />
+              </Tooltip>
+            </div>
+          </Sider>
+          <Layout style={{ marginLeft: siderPx, transition: "margin-left 0.2s ease", background: "transparent" }}>
+            <Header className="admin-header">
+              <Flex align="center" gap={12} style={{ flex: 1, minWidth: 0 }}>
+                <span className="admin-header-title">{adminNavTitle[adminMenuKey] || "控制台"}</span>
+                <Input
+                  allowClear
+                  readOnly
+                  prefix={<SearchOutlined style={{ opacity: 0.45 }} />}
+                  placeholder="搜索（预留）"
+                  style={{ maxWidth: 320, borderRadius: 10 }}
+                />
+              </Flex>
+              <Space size={4}>
+                <Tooltip title={isDark ? "浅色模式" : "深色模式"}>
+                  <Button type="text" icon={<BgColorsOutlined />} onClick={() => setIsDark((d) => !d)} />
+                </Tooltip>
+                <Badge dot>
+                  <Button type="text" icon={<BellOutlined />} />
+                </Badge>
+                <Dropdown
+                  menu={{
+                    items: [
+                      {
+                        key: "pwd",
+                        label: "修改密码",
+                        onClick: () => setPwdOpen(true)
+                      },
+                      {
+                        key: "out",
+                        danger: true,
+                        label: "退出登录",
+                        onClick: () => {
+                          localStorage.removeItem("admin_token");
+                          localStorage.removeItem("admin_role");
+                          setAdminRole("");
+                          setToken("");
+                        }
+                      }
+                    ]
+                  }}
+                  placement="bottomRight"
+                >
+                  <Space style={{ cursor: "pointer", paddingLeft: 4 }}>
+                    <Avatar
+                      size="small"
+                      style={{
+                        background: "linear-gradient(135deg,#6366f1,#22d3ee)",
+                        fontWeight: 700
+                      }}
+                    >
+                      {(adminRole || "A").slice(0, 1).toUpperCase()}
+                    </Avatar>
+                  </Space>
+                </Dropdown>
+              </Space>
+            </Header>
+            <Content style={{ background: "transparent" }}>
+              <div className="admin-content-inner">
+                {adminRole && !["admin", "subadmin"].includes(adminRole) ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16, borderRadius: 12 }}
+                    message="当前登录账号不是后台管理员"
+                    description="用户、订单、子账号、系统设置等接口需要 admin / subadmin 角色。列表为空或报错时，请换管理员账号登录。"
+                  />
+                ) : null}
+                <Tabs
+                  activeKey={adminMenuKey}
+                  onChange={setAdminMenuKey}
+                  tabBarStyle={{ display: "none", height: 0, margin: 0, padding: 0, minHeight: 0 }}
+                  destroyOnHidden
+                  items={[
+                    {
+                      key: "overview",
+                      label: "overview",
+                      children: (
+                        <>
+                          <div className="admin-toolbar admin-quick-btns">
+                            <Typography.Text type="secondary">快捷入口</Typography.Text>
+                            <div className="admin-toolbar-actions">
+                              <Button size="small" onClick={() => setAdminMenuKey("users")}>
+                                用户
+                              </Button>
+                              <Button size="small" onClick={() => setAdminMenuKey("experts")}>
+                                专家
+                              </Button>
+                              <Button size="small" onClick={() => setAdminMenuKey("orders")}>
+                                订单
+                              </Button>
+                              <Button size="small" type="primary" loading={loading} onClick={loadAll}>
+                                刷新数据
+                              </Button>
+                              <Button size="small" onClick={() => setSubOpen(true)}>
+                                添加子账号
+                              </Button>
+                            </div>
+                          </div>
+                          <div className="admin-metric-grid">
+                            <div className="admin-metric-card">
+                              <div className="admin-metric-label">用户总数</div>
+                              <div className="admin-metric-value admin-metric-value--accent">{overview?.users ?? 0}</div>
+                            </div>
+                            <div className="admin-metric-card">
+                              <div className="admin-metric-label">专家条目</div>
+                              <div className="admin-metric-value">{overview?.experts ?? 0}</div>
+                            </div>
+                            <div className="admin-metric-card">
+                              <div className="admin-metric-label">订单数</div>
+                              <div className="admin-metric-value">{overview?.orders ?? 0}</div>
+                            </div>
+                            <div className="admin-metric-card">
+                              <div className="admin-metric-label">充值总额</div>
+                              <div className="admin-metric-value admin-metric-value--accent">
+                                ¥{Number(overview?.paidAmount || 0).toFixed(2)}
+                              </div>
+                            </div>
+                          </div>
+                          <Row gutter={[16, 16]} className="admin-split-row">
+                            <Col xs={24} lg={14}>
+                              <Card className="admin-page-card" title="运营对比（相对规模）" size="small" variant="borderless">
+                                <div className="admin-progress-stack" style={{ display: "grid", gap: 14 }}>
+                                  <Progress
+                                    percent={Math.round(((overview?.users || 0) / overviewScaleMax) * 100)}
+                                    format={() => `${overview?.users || 0} 用户`}
+                                    strokeColor={{ "0%": "#6366f1", "100%": "#22d3ee" }}
+                                  />
+                                  <Progress
+                                    percent={Math.round(((overview?.orders || 0) / overviewScaleMax) * 100)}
+                                    format={() => `${overview?.orders || 0} 订单`}
+                                    strokeColor={{ "0%": "#22d3ee", "100%": "#a78bfa" }}
+                                  />
+                                  <Progress
+                                    percent={Math.round(((overview?.experts || 0) / overviewScaleMax) * 100)}
+                                    format={() => `${overview?.experts || 0} 专家`}
+                                    strokeColor={{ "0%": "#a78bfa", "100%": "#6366f1" }}
+                                  />
+                                </div>
+                              </Card>
+                            </Col>
+                            <Col xs={24} lg={10}>
+                              <Card className="admin-page-card" title="常用导航" size="small" variant="borderless">
+                                <Space wrap className="admin-quick-btns">
+                                  <Button type="primary" ghost onClick={() => setAdminMenuKey("users")}>
+                                    用户管理
+                                  </Button>
+                                  <Button onClick={() => setAdminMenuKey("experts")}>专家机器人</Button>
+                                  <Button onClick={() => setAdminMenuKey("batchPast")}>往期批量</Button>
+                                  <Button onClick={() => setAdminMenuKey("subs")}>子账号</Button>
+                                  <Button onClick={() => setPwdOpen(true)}>修改密码</Button>
+                                </Space>
+                                <Typography.Paragraph type="secondary" style={{ marginBottom: 0, marginTop: 12, fontSize: 12 }}>
+                                  左侧为固定导航；数据来自已加载的后台接口。深浅色在右上角切换。
+                                </Typography.Paragraph>
+                              </Card>
+                            </Col>
+                          </Row>
+                          <Row gutter={[16, 16]}>
+                            <Col xs={24} lg={12}>
+                              <Card className="admin-page-card" size="small" title="客服设置" variant="borderless">
+                                <Flex vertical gap={12}>
+                                  <Input
+                                    value={serviceWechat}
+                                    onChange={(e) => setServiceWechat(e.target.value)}
+                                    placeholder="例如 wx123456"
+                                    style={{ maxWidth: "100%" }}
+                                  />
+                                  <Flex justify="flex-end">
+                                    <Button
+                                      type="primary"
+                                      onClick={async () => {
+                                        try {
+                                          await withAuth("/admin/settings", {
+                                            method: "PUT",
+                                            body: JSON.stringify({ serviceWechat: String(serviceWechat || "").trim() })
+                                          });
+                                          message.success("客服微信已保存");
+                                        } catch (e) {
+                                          message.error(e.message || "保存失败");
+                                        }
+                                      }}
+                                    >
+                                      保存客服微信
+                                    </Button>
+                                  </Flex>
+                                </Flex>
+                              </Card>
+                            </Col>
+                            <Col xs={24} lg={12}>
+                              <Card
+                                className="admin-page-card"
+                                size="small"
+                                title={`打赏金额区间（最近${BOT_PAST_PERIODS}期）`}
+                                variant="borderless"
+                              >
+                                <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                                  {[
+                                    ["1avatar", "精选特码"],
+                                    ["2avatar", "生肖特码"],
+                                    ["3avatar", "精选三中三"]
+                                  ].map(([base, label]) => (
+                                    <Flex key={base} wrap="wrap" gap={8} align="center" justify="space-between">
+                                      <Typography.Text style={{ minWidth: 88 }}>{label}</Typography.Text>
+                                      <Space wrap>
+                                        <Input
+                                          value={rewardRanges[base].min}
+                                          onChange={(e) =>
+                                            setRewardRanges((prev) => ({
+                                              ...prev,
+                                              [base]: { ...prev[base], min: e.target.value }
+                                            }))
+                                          }
+                                          placeholder="最小"
+                                          style={{ width: 100 }}
+                                        />
+                                        <span>—</span>
+                                        <Input
+                                          value={rewardRanges[base].max}
+                                          onChange={(e) =>
+                                            setRewardRanges((prev) => ({
+                                              ...prev,
+                                              [base]: { ...prev[base], max: e.target.value }
+                                            }))
+                                          }
+                                          placeholder="最大"
+                                          style={{ width: 100 }}
+                                        />
+                                        <Button type="primary" onClick={() => saveRewardRangeByBase(base)}>
+                                          保存
+                                        </Button>
+                                      </Space>
+                                    </Flex>
+                                  ))}
+                                </Space>
+                              </Card>
+                            </Col>
+                          </Row>
+                        </>
+                      )
+                    },
           {
             key: "users",
             label: "用户",
             children: (
-              <Table
+              <Card className="admin-page-card" variant="borderless" title="用户列表">
+                <Table
                 rowKey="id"
                 size="small"
                 dataSource={users}
+                pagination={{ pageSize: 12, showSizeChanger: true }}
                 columns={[
                   { title: "ID", dataIndex: "id", width: 70 },
                   { title: "用户名", dataIndex: "username" },
@@ -1046,7 +1342,11 @@ export default function AdminApp() {
                     title: "余额",
                     dataIndex: "balance",
                     width: 120,
-                    render: (v) => <span style={{ color: "#d4380d", fontWeight: 700 }}>¥{Number(v || 0).toFixed(2)}</span>
+                    render: (v) => (
+                      <span style={{ color: "#f59e0b", fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
+                        ¥{Number(v || 0).toFixed(2)}
+                      </span>
+                    )
                   },
                   {
                     title: "状态",
@@ -1059,6 +1359,7 @@ export default function AdminApp() {
                   {
                     title: "操作",
                     width: 240,
+                    align: "right",
                     render: (_, row) => (
                       <Space>
                         <Button
@@ -1091,27 +1392,45 @@ export default function AdminApp() {
                     )
                   }
                 ]}
-              />
+                />
+              </Card>
             )
           },
           {
             key: "experts",
             label: "专家",
             children: (
-              <div style={{ display: "grid", gap: 10 }}>
-                <Space wrap>
-                  <Button type={expertType === "all" ? "primary" : "default"} onClick={() => setExpertType("all")}>全部机器人</Button>
-                  <Button type={expertType === "1avatar" ? "primary" : "default"} onClick={() => setExpertType("1avatar")}>精选特码🔥</Button>
-                  <Button type={expertType === "2avatar" ? "primary" : "default"} onClick={() => setExpertType("2avatar")}>生肖特码🐴</Button>
-                  <Button type={expertType === "3avatar" ? "primary" : "default"} onClick={() => setExpertType("3avatar")}>精选三中三💯</Button>
-                </Space>
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  往期批量请在「往期批量」Tab 操作；此处「编辑内容」可单条精调。
-                </Typography.Text>
+              <Card className="admin-page-card" variant="borderless" title="专家机器人">
+                <div className="admin-toolbar">
+                  <Space wrap size={[8, 8]}>
+                    <Typography.Text type="secondary" style={{ marginRight: 4 }}>
+                      筛选
+                    </Typography.Text>
+                    <Button type={expertType === "all" ? "primary" : "default"} onClick={() => setExpertType("all")}>
+                      全部机器人
+                    </Button>
+                    <Button type={expertType === "1avatar" ? "primary" : "default"} onClick={() => setExpertType("1avatar")}>
+                      精选特码🔥
+                    </Button>
+                    <Button type={expertType === "2avatar" ? "primary" : "default"} onClick={() => setExpertType("2avatar")}>
+                      生肖特码🐴
+                    </Button>
+                    <Button type={expertType === "3avatar" ? "primary" : "default"} onClick={() => setExpertType("3avatar")}>
+                      精选三中三💯
+                    </Button>
+                  </Space>
+                  <Typography.Text type="secondary" className="admin-toolbar-actions">
+                    共 {filteredRobotExperts.length} 条
+                  </Typography.Text>
+                </div>
+                <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+                  往期批量请在「往期批量」菜单操作；此处「编辑内容」可单条精调。
+                </Typography.Paragraph>
                 <Table
                   rowKey="id"
                   size="small"
                   dataSource={filteredRobotExperts}
+                  pagination={{ pageSize: 12, showSizeChanger: true }}
                   columns={[
                     { title: "专家名字", dataIndex: "name", width: 150 },
                     { title: "胜率", dataIndex: "winRate", width: 90, render: (v) => `${v}%` },
@@ -1132,9 +1451,12 @@ export default function AdminApp() {
                     {
                       title: "操作",
                       width: 120,
+                      align: "right",
                       render: (_, row) => (
                         <Button
                           size="small"
+                          type="primary"
+                          ghost
                           onClick={() => {
                             setEditingBot(row);
                             setLatestIssue(String(row.latestIssue || row.issue || ""));
@@ -1155,41 +1477,54 @@ export default function AdminApp() {
                     }
                   ]}
                 />
-              </div>
+              </Card>
             )
           },
           {
             key: "orders",
             label: "购买记录",
             children: (
-              <Table
+              <Card className="admin-page-card" variant="borderless" title="购买记录">
+                <Table
                 rowKey="id"
                 size="small"
                 dataSource={orderRecords}
+                pagination={{ pageSize: 12, showSizeChanger: true }}
                 columns={[
                   { title: "ID", dataIndex: "id", width: 70 },
                   { title: "用户名称", dataIndex: "username", width: 120 },
                   { title: "购买内容", dataIndex: "title", ellipsis: true },
-                  { title: "购买金额", dataIndex: "amount", width: 120, render: (v) => `¥${Number(v || 0).toFixed(2)}` },
+                  {
+                    title: "购买金额",
+                    dataIndex: "amount",
+                    width: 120,
+                    render: (v) => (
+                      <span style={{ fontWeight: 600, fontVariantNumeric: "tabular-nums" }}>¥{Number(v || 0).toFixed(2)}</span>
+                    )
+                  },
                   { title: "购买日期", dataIndex: "paid_at", width: 180, render: (v, row) => v || row.created_at || "-" },
                   {
                     title: "状态",
                     dataIndex: "status",
                     width: 110,
+                    align: "right",
                     render: (v) => (String(v) === "success" ? <Tag color="green">正常</Tag> : <Tag color="orange">{v || "未知"}</Tag>)
                   }
                 ]}
-              />
+                />
+              </Card>
             )
           },
           {
             key: "subs",
             label: "子账号管理",
             children: (
-              <Table
+              <Card className="admin-page-card" variant="borderless" title="子账号">
+                <Table
                 rowKey="id"
                 size="small"
                 dataSource={subAdmins}
+                pagination={{ pageSize: 12, showSizeChanger: true }}
                 columns={[
                   { title: "ID", dataIndex: "id", width: 70 },
                   { title: "账号", dataIndex: "username" },
@@ -1200,9 +1535,12 @@ export default function AdminApp() {
                   {
                     title: "操作",
                     width: 160,
+                    align: "right",
                     render: (_, row) => (
                       <Button
                         size="small"
+                        type="primary"
+                        ghost
                         onClick={async () => {
                           const np = window.prompt(`给账号 ${row.username} 设置新密码（至少3位）`);
                           if (!np) return;
@@ -1222,13 +1560,15 @@ export default function AdminApp() {
                     )
                   }
                 ]}
-              />
+                />
+              </Card>
             )
           },
           {
             key: "batchPast",
             label: "往期批量",
             children: (
+              <Card className="admin-page-card" variant="borderless" title="往期批量">
               <div style={{ display: "grid", gap: 12 }}>
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
                   选择期数后约 0.4s 自动拉取该期开奖；精选/生肖展示特码与生肖，三中三展示前区 6 个开奖号。勾选机器人后点「应用批量修改」写入库内 recent10。
@@ -1533,12 +1873,17 @@ export default function AdminApp() {
                   </Col>
                 </Row>
               </div>
+              </Card>
             )
           }
         ]}
       />
+              </div>
+            </Content>
+          </Layout>
+        </Layout>
 
-      <Modal
+        <Modal
         width={820}
         open={botEditorOpen}
         title={editingBot ? `编辑机器人：${editingBot.name}` : "编辑机器人"}
@@ -1584,7 +1929,10 @@ export default function AdminApp() {
               recent10 = await Promise.all(
                 recent10.map(async (r) => {
                   try {
-                    const payload = await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(r.issue)}`).catch(() => ({}));
+                    const exp = normalizeExpectForMacauHistory(r.issue);
+                    const payload = exp
+                      ? await fetchJsonRetry(`${API}/macau-history/${encodeURIComponent(exp)}`).catch(() => ({}))
+                      : {};
                     const draw = parseHistoryDraw(payload);
                     if (!draw) return r;
                     if (editingBot.base === "2avatar") {
@@ -1739,6 +2087,7 @@ export default function AdminApp() {
           <Input value={editingBalance} onChange={(e) => setEditingBalance(e.target.value)} />
         </div>
       </Modal>
-    </div>
+      </App>
+    </ConfigProvider>
   );
 }

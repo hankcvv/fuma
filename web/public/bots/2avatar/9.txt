@@ -1,10 +1,12 @@
 bot_name: 内幕营
 robotId: 55.jpg
-issue: 2026123
+issue: 2026122
 title: 第*****期 新澳🔥🀄💰【内幕营】🚲🚗内幕猛料【1肖中特】,抓住时机为自己创造财，长期跟踪稳赚
-prediction: 虎，04
+prediction: 馬，01
 
 recent10:
+issue: 2026121
+羊，44
 issue: 2026122
 馬，01
 issue: 2026117
@@ -13,5 +15,3 @@ issue: 2026118
 豬，04
 issue: 2026119
 猴，04
-issue: 2026120
-牛，06

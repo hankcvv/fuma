@@ -1,0 +1,274 @@
+/* Fuma 后台 SaaS 壳层：与 AdminApp 中 className 对应 */
+
+.admin-app-root {
+  min-height: 100vh;
+  background: var(--admin-bg-page);
+}
+
+.admin-app-root--dark {
+  --admin-bg-page: #080a0f;
+  --admin-bg-elevated: rgba(22, 27, 38, 0.92);
+  --admin-border: rgba(255, 255, 255, 0.08);
+  --admin-text-muted: rgba(255, 255, 255, 0.55);
+  --admin-glass: rgba(18, 22, 30, 0.65);
+}
+
+.admin-app-root:not(.admin-app-root--dark) {
+  --admin-bg-page: #f4f6fb;
+  --admin-bg-elevated: rgba(255, 255, 255, 0.82);
+  --admin-border: rgba(15, 23, 42, 0.08);
+  --admin-text-muted: rgba(15, 23, 42, 0.45);
+  --admin-glass: rgba(255, 255, 255, 0.72);
+}
+
+.admin-sider {
+  position: fixed !important;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  z-index: 100;
+  border-right: 1px solid var(--admin-border) !important;
+  background: linear-gradient(180deg, #0b0e14 0%, #121826 48%, #0e1219 100%) !important;
+  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.12);
+}
+
+.admin-sider .ant-menu-dark,
+.admin-sider .ant-menu-dark.ant-menu-inline {
+  background: transparent !important;
+}
+
+.admin-sider .ant-menu-item {
+  border-radius: 10px !important;
+  margin: 4px 8px !important;
+  width: calc(100% - 16px) !important;
+  transition: background 0.2s ease, color 0.2s ease, transform 0.2s ease;
+}
+
+.admin-sider .ant-menu-item-selected {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.35), rgba(56, 189, 248, 0.2)) !important;
+  box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.35);
+}
+
+.admin-sider-logo {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: #e8ecff;
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+.admin-sider-logo-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, #6366f1, #22d3ee);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 15px;
+  box-shadow: 0 4px 14px rgba(99, 102, 241, 0.45);
+}
+
+.admin-header {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  height: 56px;
+  padding: 0 24px !important;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--admin-glass) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--admin-border) !important;
+  transition: background 0.25s ease, border-color 0.25s ease;
+}
+
+.admin-header-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: inherit;
+  letter-spacing: -0.01em;
+}
+
+.admin-main {
+  margin-left: 72px;
+  min-height: 100vh;
+  transition: margin-left 0.2s ease;
+}
+
+@media (min-width: 992px) {
+  .admin-main--expanded {
+    margin-left: 200px;
+  }
+}
+
+.admin-content-inner {
+  padding: 24px 28px 40px;
+  max-width: 1480px;
+  margin: 0 auto;
+}
+
+.admin-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 1100px) {
+  .admin-metric-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (max-width: 520px) {
+  .admin-metric-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.admin-metric-card {
+  position: relative;
+  border-radius: 14px;
+  padding: 18px 20px;
+  overflow: hidden;
+  background: var(--admin-bg-elevated);
+  border: 1px solid var(--admin-border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 12px 32px rgba(99, 102, 241, 0.08);
+  transition: transform 0.22s ease, box-shadow 0.22s ease, border-color 0.22s ease;
+}
+
+.admin-app-root--dark .admin-metric-card {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2), 0 12px 40px rgba(0, 0, 0, 0.35);
+}
+
+.admin-metric-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.45), rgba(34, 211, 238, 0.15), transparent);
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.65;
+}
+
+.admin-metric-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 16px 40px rgba(99, 102, 241, 0.12);
+}
+
+.admin-metric-label {
+  font-size: 12px;
+  color: var(--admin-text-muted);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.admin-metric-value {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.admin-metric-value--accent {
+  background: linear-gradient(135deg, #6366f1, #22d3ee);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.admin-split-row {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+@media (max-width: 960px) {
+  .admin-split-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+.admin-page-card.ant-card {
+  border-radius: 14px !important;
+  overflow: hidden;
+  border: 1px solid var(--admin-border) !important;
+  background: var(--admin-bg-elevated) !important;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+  transition: box-shadow 0.2s ease;
+}
+
+.admin-app-root--dark .admin-page-card.ant-card {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+}
+
+.admin-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.admin-toolbar-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.admin-main .ant-tabs-nav {
+  display: none !important;
+}
+
+.admin-login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: radial-gradient(1200px 600px at 20% -10%, rgba(99, 102, 241, 0.2), transparent),
+    radial-gradient(900px 500px at 100% 20%, rgba(34, 211, 238, 0.12), transparent), #0b0e14;
+}
+
+.admin-login-card.ant-card {
+  width: 100%;
+  max-width: 420px;
+  border-radius: 16px !important;
+  border: 1px solid rgba(255, 255, 255, 0.08) !important;
+  background: rgba(22, 27, 38, 0.75) !important;
+  backdrop-filter: blur(16px);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+}
+
+.admin-login-card .ant-card-head-title {
+  color: #e8ecff !important;
+  font-weight: 600;
+}
+
+.admin-quick-btns .ant-btn {
+  border-radius: 10px;
+}
+
+.admin-progress-stack .ant-progress-outer {
+  margin-inline-end: 0;
+}

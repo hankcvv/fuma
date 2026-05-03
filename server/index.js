@@ -220,12 +220,19 @@ app.get("/api/macau-jc", async (_req, res) => {
   }
 });
 
-/** 查询单一期号历史开奖，期号使用完整 expect 格式，如 2026110 */
+/** 查询单一期号历史开奖；兼容 5～6 位短期号（按当前年 + 后三位补成 7 位） */
 app.get("/api/macau-history/:expect", async (req, res) => {
-  const expect = String(req.params.expect || "").trim();
-  if (!/^\d{6,}$/.test(expect)) {
+  let expect = String(req.params.expect || "").replace(/\D/g, "");
+  if (!expect || expect.length < 5) {
     return res.status(400).json({ message: "期号格式错误" });
   }
+  if (expect.length < 7) {
+    const y = new Date().getFullYear();
+    const tail = expect.slice(-3).padStart(3, "0");
+    expect = `${y}${tail}`;
+  }
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
   try {
     const r = await fetch(`${MACAU_HISTORY_URL}/${encodeURIComponent(expect)}`, {
       headers: {
@@ -394,6 +401,9 @@ app.get("/api/bots/:base", async (req, res) => {
   if (!["1avatar", "2avatar", "3avatar"].includes(base)) {
     return res.status(400).json({ message: "base 错误" });
   }
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
   try {
     const mysqlRows = await loadBotsFromMysql(base);
     if (Array.isArray(mysqlRows) && mysqlRows.length) {

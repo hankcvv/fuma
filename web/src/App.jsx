@@ -833,12 +833,23 @@ function App() {
     const publishIssue = nextBotIssueFromLive(liveIssue, nowTick);
     const displayIssue = String(publishIssue || getCurrentBotIssue(nowTick) || spec.issue || (rt?.displayIssue ?? ""));
     const specIssueMatch = normalizeIssueKey(spec?.issue) === normalizeIssueKey(displayIssue);
-    const latestPrediction = zodiac || three
-      ? String((specIssueMatch && spec?.prediction) ? spec.prediction : generatedPredictionByType(spec, displayIssue, { zodiac, three }) || spec.prediction || "—")
-      : String(spec.prediction || rt?.generatedPrediction || "—");
     const savedPast = Array.isArray(spec.recent10)
       ? spec.recent10.map((r) => ({ issue: String(r.issue || ""), body: String(r.body || "") })).filter((r) => r.issue)
       : [];
+    const recentBodyForDisplay = savedPast.find((r) => normalizeIssueKey(r.issue) === normalizeIssueKey(displayIssue))?.body;
+    const latestPrediction = zodiac || three
+      ? String(
+          (recentBodyForDisplay && String(recentBodyForDisplay).trim())
+            ? recentBodyForDisplay
+            : (specIssueMatch && spec?.prediction)
+              ? spec.prediction
+              : generatedPredictionByType(spec, displayIssue, { zodiac, three }) || spec.prediction || "—"
+        )
+      : String(
+          (recentBodyForDisplay && String(recentBodyForDisplay).trim())
+            ? recentBodyForDisplay
+            : spec.prediction || rt?.generatedPrediction || "—"
+        );
     const generatedPast = (zodiac || three)
       ? Array.from({ length: 10 }, (_, idx) => {
           const iss = String(Number(displayIssue) - (idx + 1));
