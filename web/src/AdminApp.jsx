@@ -204,7 +204,7 @@ function assignTriplesPerRobot(first6, robotCount) {
   return result;
 }
 
-/** 三中三付费串：每组内三码升序，组与组之间按数值序排列；支持「.」或空格分隔 */
+/** 三中三付费串：每组内三码升序，组与组之间按数值序排列；支持「.」或空格分隔；去掉完全相同的组 */
 function sortThreeAvatarPaidBody(raw) {
   const s = String(raw || "").trim();
   if (!s) return s;
@@ -229,8 +229,74 @@ function sortThreeAvatarPaidBody(raw) {
     }
     return 0;
   });
+  const seenTriple = new Set();
+  const uniqGroups = [];
+  for (const g of groups) {
+    const k = `${g.key[0]},${g.key[1]},${g.key[2]}`;
+    if (seenTriple.has(k)) continue;
+    seenTriple.add(k);
+    uniqGroups.push(g);
+  }
   const sep = dot ? "." : " ";
-  return [...groups.map((g) => g.display), ...rest].join(sep);
+  return [...uniqGroups.map((g) => g.display), ...rest].join(sep);
+}
+
+/** 提取 1～49 号码，去重后升序 */
+function extractNums1to49(raw) {
+  const set = new Set();
+  const str = String(raw || "");
+  const re = /\d+/g;
+  let m;
+  while ((m = re.exec(str)) !== null) {
+    const n = Number(m[0]);
+    if (Number.isFinite(n) && n >= 1 && n <= 49) set.add(Math.floor(n));
+  }
+  return [...set].sort((a, b) => a - b);
+}
+
+/** 精选特码：仅保留 1～49 号码，去重、升序、点号连接 */
+function normalizeOneAvatarPaidBody(raw) {
+  const nums = extractNums1to49(raw);
+  if (!nums.length) return String(raw || "").trim();
+  return nums.map((n) => String(n).padStart(2, "0")).join(".");
+}
+
+const ZODIAC_SIMPLE_ORDER = ["鼠", "牛", "虎", "兔", "龙", "蛇", "马", "羊", "猴", "鸡", "狗", "猪"];
+function toSimpleZodiacChar(ch) {
+  const map = { 龍: "龙", 馬: "马", 雞: "鸡", 豬: "猪" };
+  return map[ch] || ch;
+}
+function zodiacSortIndex(ch) {
+  const c = toSimpleZodiacChar(ch);
+  const i = ZODIAC_SIMPLE_ORDER.indexOf(c);
+  return i === -1 ? 99 : i;
+}
+
+/** 生肖特码：生肖去重并按鼠→猪排序；号码去重升序；与前台 format 一致（生肖行 + 换行 + 点号号码） */
+function normalizeZodiacAvatarPaidBody(raw) {
+  const s = String(raw || "").trim();
+  if (!s) return s;
+  const seen = new Set();
+  const zList = [];
+  for (const m of s.matchAll(/[鼠牛虎兔龙龍蛇马馬羊猴鸡雞狗猪豬]/g)) {
+    const simp = toSimpleZodiacChar(m[0]);
+    if (seen.has(simp)) continue;
+    seen.add(simp);
+    zList.push(simp);
+  }
+  zList.sort((a, b) => zodiacSortIndex(a) - zodiacSortIndex(b));
+  const nums = extractNums1to49(s);
+  const numLine = nums.map((n) => String(n).padStart(2, "0")).join(".");
+  if (!zList.length) return numLine || s;
+  if (!nums.length) return zList.join("，");
+  return `${zList.join("，")}\n${numLine}`;
+}
+
+function normalizePaidBodyByBase(base, body) {
+  if (base === "1avatar") return normalizeOneAvatarPaidBody(body);
+  if (base === "2avatar") return normalizeZodiacAvatarPaidBody(body);
+  if (base === "3avatar") return sortThreeAvatarPaidBody(String(body || ""));
+  return String(body || "").trim();
 }
 
 export default function AdminApp() {
@@ -461,13 +527,16 @@ export default function AdminApp() {
           idx3 += 1;
           nextBody = sortThreeAvatarPaidBody(replaceOneThreeGroup(sourceBody, t[0], t[1], t[2]));
         }
+        const normBody = (b) => normalizePaidBodyByBase(base, b);
+        nextBody = normBody(nextBody);
         if (idx >= 0) recent10[idx] = { ...recent10[idx], body: nextBody };
         else recent10.unshift({ issue: String(issue), body: nextBody });
         const cleanedRecent10 = recent10
           .filter((r) => String(r.issue || "").trim())
-          .slice(0, BOT_PAST_PERIODS);
+          .slice(0, BOT_PAST_PERIODS)
+          .map((r) => ({ ...r, body: normBody(r.body) }));
         const latestIss = String(row.latestIssue || row.issue || "").trim();
-        let nextPrediction = String(row.effectivePrediction || row.prediction || "");
+        let nextPrediction = normBody(String(row.effectivePrediction || row.prediction || ""));
         // 批量修改的期号若即当前「最新发布期」，前台付费气泡读 prediction / 需与 recent10 一致
         if (latestIss && normalizeIssueKey(issue) === normalizeIssueKey(latestIss)) {
           nextPrediction = String(nextBody);
@@ -1571,7 +1640,8 @@ export default function AdminApp() {
               <Card className="admin-page-card" variant="borderless" title="往期批量">
               <div style={{ display: "grid", gap: 12 }}>
                 <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
-                  选择期数后约 0.4s 自动拉取该期开奖；精选/生肖展示特码与生肖，三中三展示前区 6 个开奖号。勾选机器人后点「应用批量修改」写入库内 recent10。
+                  选择期数后约 0.4s 自动拉取该期开奖；勾选机器人后点「应用批量修改」写入库内 recent10，并自动整理付费格式：精选特码为 1～49
+                  不重复号码升序点号连接；生肖特码为生肖不重复且按鼠→猪排序、号码不重复升序；三中三为组内升序、组间升序且去掉完全相同的组。
                 </Typography.Paragraph>
                 <Row gutter={[16, 16]}>
                   <Col xs={24} lg={8}>
@@ -1948,11 +2018,14 @@ export default function AdminApp() {
                 })
               );
             }
+            const nb = (txt) => normalizePaidBodyByBase(editingBot.base, txt);
+            recent10 = recent10.map((r) => ({ ...r, body: nb(r.body) }));
+            const predictionOut = nb(String(latestPrediction || ""));
             await withAuth(`/admin/bot-experts/${editingBot.base}/${editingBot.file}`, {
               method: "PUT",
               body: JSON.stringify({
                 issue: String(latestIssue || "").trim(),
-                prediction: latestPrediction,
+                prediction: predictionOut,
                 recent10
               })
             });
