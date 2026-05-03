@@ -1415,6 +1415,30 @@ async function saveBotToMysql(base, file, payload) {
   return true;
 }
 
+/** 与 GET /api/admin/bot-experts 一致：启用 MySQL 时以库为准；否则读 bots 目录 txt。无部署 txt 时仅靠库也可保存。 */
+async function loadBotSpecForAdminPut(base, file) {
+  if (USE_MYSQL && mysqlLayer) {
+    const rows = await loadBotsFromMysql(base);
+    const row = rows.find((r) => r.file === file);
+    if (row) {
+      return {
+        bot_name: String(row.bot_name || ""),
+        robotId: String(row.robotId || ""),
+        issue: String(row.issue || ""),
+        title: String(row.title || ""),
+        prediction: String(row.prediction || ""),
+        recent10: Array.isArray(row.recent10) ? row.recent10 : []
+      };
+    }
+  }
+  const roots = existingBotRoots();
+  const targetPath = roots
+    .map((r) => path.join(r, base, file))
+    .find((p) => fs.existsSync(p));
+  if (targetPath) return parseBotTxtServer(fs.readFileSync(targetPath, "utf-8"));
+  return null;
+}
+
 app.get("/api/admin/bot-experts", ensureAuth, ensureAdmin, (req, res) => {
   if (USE_MYSQL && mysqlLayer) {
     Promise.all(["1avatar", "2avatar", "3avatar"].map((base) => loadBotsFromMysql(base)))
@@ -1437,7 +1461,7 @@ app.get("/api/admin/bot-experts", ensureAuth, ensureAdmin, (req, res) => {
   res.json(all);
 });
 
-app.put("/api/admin/bot-experts/:base/:file", ensureAuth, ensureAdmin, (req, res) => {
+app.put("/api/admin/bot-experts/:base/:file", ensureAuth, ensureAdmin, async (req, res) => {
   try {
     const base = String(req.params.base || "");
     const file = String(req.params.file || "");
@@ -1445,12 +1469,8 @@ app.put("/api/admin/bot-experts/:base/:file", ensureAuth, ensureAdmin, (req, res
       return res.status(400).json({ message: "base 错误" });
     }
     if (!/^\d+\.txt$/i.test(file)) return res.status(400).json({ message: "file 错误" });
-    const roots = existingBotRoots();
-    const targetPath = roots
-      .map((r) => path.join(r, base, file))
-      .find((p) => fs.existsSync(p));
-    if (!targetPath) return res.status(404).json({ message: "机器人文件不存在" });
-    const old = parseBotTxtServer(fs.readFileSync(targetPath, "utf-8"));
+    const old = await loadBotSpecForAdminPut(base, file);
+    if (!old) return res.status(404).json({ message: "机器人不存在" });
     const next = {
       ...old,
       issue: String(req.body?.issue ?? old.issue ?? "").trim(),

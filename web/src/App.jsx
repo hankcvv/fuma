@@ -581,7 +581,7 @@ function App() {
   }, [tabs, page, detail?.kind]);
 
   useEffect(() => {
-    if (!token || page !== "detail" || detail?.kind !== "bot") return;
+    if (page !== "detail" || detail?.kind !== "bot") return;
     const dd = getBotDisplayData(detail.spec);
     const expects = [dd.displayIssue, ...(dd.pastRows || []).map((r) => r.issue)];
     const pending = expects.filter((exp) => !(exp in macauHistoryMap));
@@ -608,10 +608,10 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, page, detail, nowTick, macauHistoryMap]);
+  }, [page, detail, nowTick, macauHistoryMap]);
 
   useEffect(() => {
-    if (!token || page !== "expertDetail" || !expertDetail?.spec) return;
+    if (page !== "expertDetail" || !expertDetail?.spec) return;
     const expects = buildExpertPeriodRows(expertDetail.spec).map((r) => r.issue);
     const pending = expects.filter((exp) => !(exp in macauHistoryMap));
     if (!pending.length) return;
@@ -637,7 +637,7 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [token, page, expertDetail, nowTick, macauHistoryMap]);
+  }, [page, expertDetail, nowTick, macauHistoryMap]);
 
   useEffect(() => {
     if (page !== "home") return;

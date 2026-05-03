@@ -244,7 +244,17 @@ start_pm2() {
   pm2 delete "$PM2_NAME" 2>/dev/null || true
   pm2 start index.js --name "$PM2_NAME" --update-env
   pm2 save
-  ok "PM2 应用名: $PM2_NAME（端口 ${APP_PORT}，可用 pm2 logs $PM2_NAME）"
+  info "注册开机自启（写入 systemd，重启后 PM2 会自动拉起应用）"
+  if [[ "$(id -u)" -eq 0 ]]; then
+    if env PATH="$PATH:/usr/local/bin:/usr/bin" pm2 startup systemd -u root --hp /root >/tmp/fuma-pm2-startup.txt 2>&1; then
+      ok "PM2 systemd 自启已配置（可用: systemctl status pm2-* 或 pm2 startup 查看）"
+    else
+      warn "PM2 自启未自动完成，请执行一次: pm2 startup   把输出的 sudo 整行复制执行；详情: cat /tmp/fuma-pm2-startup.txt"
+    fi
+  else
+    warn "非 root 用户请自行执行: pm2 startup 并按屏幕提示完成开机自启"
+  fi
+  ok "PM2 应用名: $PM2_NAME（监听 ${APP_PORT}，日志: pm2 logs $PM2_NAME）"
 }
 
 health_check() {
@@ -314,3 +324,4 @@ health_check
 
 echo ""
 ok "部署流程结束。常用命令: pm2 status | pm2 logs ${PM2_NAME} | curl http://127.0.0.1:${APP_PORT}/api/health"
+info "访问说明: 网站程序监听 ${APP_PORT}；浏览器默认 http://IP 走 80 端口，需由 Nginx 反代到 ${APP_PORT}。若只访问 http://IP:${APP_PORT} 也能打开（需放行防火墙）。未配 Nginx 时只能用带端口地址访问。"
